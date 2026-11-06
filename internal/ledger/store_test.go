@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
+	"banksec-lab/internal/domain"
 	"banksec-lab/internal/testsupport"
 )
 
@@ -153,6 +156,38 @@ func TestAppendTransaction_OverflowingSumRejected(t *testing.T) {
 	}
 	if len(hist) != 0 {
 		t.Fatalf("expected no entries written for the overflowing transaction, got %d", len(hist))
+	}
+}
+
+func TestAppendTransaction_ConcurrentWritesDoNotFailWithBusy(t *testing.T) {
+	// Without a busy_timeout, SQLite returns SQLITE_BUSY immediately on
+	// lock contention instead of waiting -- genuinely concurrent writers
+	// (e.g. backend's vulnerable, non-atomicity-enforced Transfer path)
+	// must not fail outright just because another write is in flight.
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	const n = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			txID := domain.TransactionID("tx-" + strconv.Itoa(i))
+			errs <- s.AppendTransaction(ctx, []Entry{
+				{TxID: txID, AccountID: "a1", Amount: -1, Timestamp: time.Now()},
+				{TxID: txID, AccountID: "a2", Amount: 1, Timestamp: time.Now()},
+			})
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent AppendTransaction failed: %v", err)
+		}
 	}
 }
 

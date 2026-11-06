@@ -22,6 +22,7 @@ import (
 
 	"banksec-lab/internal/apperr"
 	"banksec-lab/internal/audit"
+	"banksec-lab/internal/config"
 	"banksec-lab/internal/domain"
 	"banksec-lab/internal/keystore"
 	"banksec-lab/internal/ledger"
@@ -42,6 +43,14 @@ const externalSourceAccount domain.AccountID = "external"
 // confirmed by probe during review) -- this cap keeps every legitimate
 // balance far below that boundary.
 const maxAccountBalance domain.Money = math.MaxInt64 / 2
+
+// raceWindowForVulnerableMode is injected between reading a balance and
+// appending the resulting transaction when SecurityProfile.AtomicityEnforced
+// is false, so the TOCTOU window this models is reliably, deterministically
+// reproducible in tests -- per Task 15's requirement that each vulnerability
+// have a deterministic demonstration, not one dependent on incidental
+// goroutine-scheduling luck.
+const raceWindowForVulnerableMode = 5 * time.Millisecond
 
 // Service is the banking backend's interface.
 type Service interface {
@@ -64,6 +73,7 @@ type service struct {
 	// task's business logic does not call it yet.
 	keystore keystore.Store
 	audit    audit.Stream
+	profile  config.SecurityProfile
 
 	mu sync.Mutex
 }
@@ -92,12 +102,15 @@ func randomHex(n int) string {
 	return hex.EncodeToString(buf)
 }
 
-// NewService constructs a banking Service.
-func NewService(l ledger.Store, k keystore.Store, a audit.Stream) Service {
+// NewService constructs a banking Service. Authorization enforcement is
+// gated by p.AuthzEnforced; input validation (amounts, account existence)
+// is always on regardless of profile (ARCHITECTURE.md §6).
+func NewService(l ledger.Store, k keystore.Store, a audit.Stream, p config.SecurityProfile) Service {
 	return &service{
 		ledger:   l,
 		keystore: k,
 		audit:    a,
+		profile:  p,
 	}
 }
 
@@ -130,12 +143,19 @@ func (s *service) CreateAccount(ctx context.Context, owner domain.PrincipalID) (
 	return acct, nil
 }
 
+// checkOwnership enforces two distinct things: that acct exists (always,
+// in both modes -- this is input validation, not a security control) and
+// that actor owns it (only when s.profile.AuthzEnforced -- the
+// deliberately exploitable surface in vulnerable mode).
 func (s *service) checkOwnership(ctx context.Context, actor domain.Principal, acct domain.AccountID) error {
 	owner, ok, err := s.ledger.AccountOwner(ctx, acct)
 	if err != nil {
 		return err
 	}
-	if !ok || owner != actor.ID {
+	if !ok {
+		return ErrAccountNotFound
+	}
+	if s.profile.AuthzEnforced && owner != actor.ID {
 		return ErrUnauthorized
 	}
 	return nil
@@ -150,7 +170,7 @@ func (s *service) Deposit(ctx context.Context, actor domain.Principal, acct doma
 		return ErrValidation
 	}
 	if err := s.checkOwnership(ctx, actor, acct); err != nil {
-		s.record(ctx, "Deposit", actor.ID, "rejected: unauthorized", nil)
+		s.record(ctx, "Deposit", actor.ID, "rejected: "+err.Error(), nil)
 		return err
 	}
 
@@ -186,7 +206,7 @@ func (s *service) Withdraw(ctx context.Context, actor domain.Principal, acct dom
 		return ErrValidation
 	}
 	if err := s.checkOwnership(ctx, actor, acct); err != nil {
-		s.record(ctx, "Withdraw", actor.ID, "rejected: unauthorized", nil)
+		s.record(ctx, "Withdraw", actor.ID, "rejected: "+err.Error(), nil)
 		return err
 	}
 
@@ -214,9 +234,6 @@ func (s *service) Withdraw(ctx context.Context, actor domain.Principal, acct dom
 }
 
 func (s *service) Transfer(ctx context.Context, actor domain.Principal, from, to domain.AccountID, amount domain.Money) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if amount <= 0 {
 		s.record(ctx, "Transfer", actor.ID, "rejected: validation", nil)
 		return ErrValidation
@@ -226,7 +243,7 @@ func (s *service) Transfer(ctx context.Context, actor domain.Principal, from, to
 		return ErrValidation
 	}
 	if err := s.checkOwnership(ctx, actor, from); err != nil {
-		s.record(ctx, "Transfer", actor.ID, "rejected: unauthorized", nil)
+		s.record(ctx, "Transfer", actor.ID, "rejected: "+err.Error(), nil)
 		return err
 	}
 	if _, ok, err := s.ledger.AccountOwner(ctx, to); err != nil {
@@ -235,6 +252,15 @@ func (s *service) Transfer(ctx context.Context, actor domain.Principal, from, to
 	} else if !ok {
 		s.record(ctx, "Transfer", actor.ID, "rejected: destination account not found", nil)
 		return ErrAccountNotFound
+	}
+
+	// The balance-check-then-append sequence below is the ledger
+	// integrity-critical section. Hardened mode serializes it with the
+	// service-wide mutex, making concurrent Transfers atomic. Vulnerable
+	// mode deliberately does not -- see raceWindowForVulnerableMode below.
+	if s.profile.AtomicityEnforced {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 	}
 
 	bal, err := s.ledger.Balance(ctx, from)
@@ -255,6 +281,15 @@ func (s *service) Transfer(ctx context.Context, actor domain.Principal, from, to
 	if toBal > maxAccountBalance-amount {
 		s.record(ctx, "Transfer", actor.ID, "rejected: would overflow destination balance cap", nil)
 		return ErrValidation
+	}
+
+	if !s.profile.AtomicityEnforced {
+		// Deliberate, deterministic TOCTOU window: every concurrent
+		// Transfer that reaches this point has already read a balance
+		// snapshot above; sleeping here (instead of serializing) lets
+		// them all proceed to append below from that same stale read --
+		// the vulnerability this profile demonstrates.
+		time.Sleep(raceWindowForVulnerableMode)
 	}
 
 	txID := s.newTxID()

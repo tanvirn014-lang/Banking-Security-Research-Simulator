@@ -20,7 +20,11 @@ type sqliteStore struct {
 // NewSQLiteStore opens (creating if necessary) a double-entry ledger store
 // at path.
 func NewSQLiteStore(path string) (Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout makes SQLite wait and retry on lock contention instead
+	// of returning SQLITE_BUSY immediately -- without it, genuinely
+	// concurrent writers (e.g. a vulnerable-mode Transfer path with no
+	// application-level serialization) fail outright rather than queue.
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open ledger store %s: %w", path, err)
 	}

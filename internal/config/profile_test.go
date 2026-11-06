@@ -64,6 +64,7 @@ func TestLoad_UnknownFieldRejected(t *testing.T) {
 		"min_accepted_crypto_profile": "standard",
 		"protocol_auth_enforce": true,
 		"authz_enforced": true,
+		"atomicity_enforced": true,
 		"keystore_encrypted_at_rest": true,
 		"audit_hash_chained": true,
 		"detection_rules": []
@@ -80,6 +81,7 @@ func TestLoad_InvalidCryptoProfileRejected(t *testing.T) {
 		"min_accepted_crypto_profile": "standard",
 		"protocol_auth_enforced": true,
 		"authz_enforced": true,
+		"atomicity_enforced": true,
 		"keystore_encrypted_at_rest": true,
 		"audit_hash_chained": true,
 		"detection_rules": []
@@ -90,5 +92,31 @@ func TestLoad_InvalidCryptoProfileRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "standrd") {
 		t.Fatalf("expected error to name the invalid value, got: %v", err)
+	}
+}
+
+func TestLoad_MissingEnforcementFieldRejected(t *testing.T) {
+	// A profile that omits an enforcement field (here: atomicity_enforced)
+	// must not silently default to false (vulnerable) -- found in
+	// Milestone 3's security review, after a hardened test profile did
+	// exactly this (internal/protocol's hardenedWireProfile omitted
+	// AtomicityEnforced and every "hardened" protocol test silently ran
+	// with atomicity off).
+	path := writeTempProfile(t, `{
+		"name": "hardened",
+		"crypto_profile": "standard",
+		"min_accepted_crypto_profile": "standard",
+		"protocol_auth_enforced": true,
+		"authz_enforced": true,
+		"keystore_encrypted_at_rest": true,
+		"audit_hash_chained": true,
+		"detection_rules": []
+	}`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for a profile missing atomicity_enforced, got none")
+	}
+	if !strings.Contains(err.Error(), "atomicity_enforced") {
+		t.Fatalf("expected the error to name the missing field, got: %v", err)
 	}
 }

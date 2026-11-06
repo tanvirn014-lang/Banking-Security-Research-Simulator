@@ -8,11 +8,23 @@ import (
 	"time"
 
 	"banksec-lab/internal/audit"
+	"banksec-lab/internal/config"
 	"banksec-lab/internal/domain"
 	"banksec-lab/internal/keystore"
 	"banksec-lab/internal/ledger"
 	"banksec-lab/internal/testsupport"
 )
+
+// hardenedTestProfile and vulnerableTestProfile are minimal literal
+// SecurityProfiles for backend tests -- only the fields backend actually
+// reads matter here; the full profile set lives in configs/*.json.
+func hardenedTestProfile() config.SecurityProfile {
+	return config.SecurityProfile{Name: "hardened", AuthzEnforced: true, AtomicityEnforced: true}
+}
+
+func vulnerableTestProfile() config.SecurityProfile {
+	return config.SecurityProfile{Name: "vulnerable", AuthzEnforced: false, AtomicityEnforced: false}
+}
 
 func newTestStores(t *testing.T) (ledger.Store, keystore.Store, audit.Stream) {
 	t.Helper()
@@ -40,8 +52,13 @@ func newTestStores(t *testing.T) (ledger.Store, keystore.Store, audit.Stream) {
 
 func newTestService(t *testing.T) (Service, audit.Stream) {
 	t.Helper()
+	return newTestServiceWithProfile(t, hardenedTestProfile())
+}
+
+func newTestServiceWithProfile(t *testing.T, p config.SecurityProfile) (Service, audit.Stream) {
+	t.Helper()
 	l, k, a := newTestStores(t)
-	return NewService(l, k, a), a
+	return NewService(l, k, a, p), a
 }
 
 func owner(id domain.PrincipalID) domain.Principal {
@@ -104,6 +121,63 @@ func TestTransfer_UnauthorizedOwnerRejected(t *testing.T) {
 	err = svc.Transfer(ctx, intruder, acctA, acctB, 100)
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestTransfer_UnauthorizedRejectedWhenAuthzEnforced(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newTestServiceWithProfile(t, hardenedTestProfile())
+
+	acctA, err := svc.CreateAccount(ctx, "owner-1")
+	if err != nil {
+		t.Fatalf("CreateAccount A: %v", err)
+	}
+	acctB, err := svc.CreateAccount(ctx, "owner-2")
+	if err != nil {
+		t.Fatalf("CreateAccount B: %v", err)
+	}
+	if err := svc.Deposit(ctx, owner("owner-1"), acctA, 1000); err != nil {
+		t.Fatalf("Deposit: %v", err)
+	}
+
+	intruder := owner("owner-2")
+	err = svc.Transfer(ctx, intruder, acctA, acctB, 100)
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized under the hardened profile, got %v", err)
+	}
+}
+
+func TestTransfer_UnauthorizedAllowedWhenAuthzNotEnforced(t *testing.T) {
+	// This is the deliberately exploitable surface the vulnerable
+	// profile exists to demonstrate (Task I1): the same cross-account
+	// action that TestTransfer_UnauthorizedRejectedWhenAuthzEnforced
+	// shows is rejected under the hardened profile.
+	ctx := context.Background()
+	svc, _ := newTestServiceWithProfile(t, vulnerableTestProfile())
+
+	acctA, err := svc.CreateAccount(ctx, "owner-1")
+	if err != nil {
+		t.Fatalf("CreateAccount A: %v", err)
+	}
+	acctB, err := svc.CreateAccount(ctx, "owner-2")
+	if err != nil {
+		t.Fatalf("CreateAccount B: %v", err)
+	}
+	if err := svc.Deposit(ctx, owner("owner-1"), acctA, 1000); err != nil {
+		t.Fatalf("Deposit: %v", err)
+	}
+
+	intruder := owner("owner-2")
+	if err := svc.Transfer(ctx, intruder, acctA, acctB, 100); err != nil {
+		t.Fatalf("expected the cross-account transfer to succeed under the vulnerable profile, got %v", err)
+	}
+
+	balB, err := svc.Balance(ctx, owner("owner-2"), acctB)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if balB != 100 {
+		t.Fatalf("expected the intruder's transfer to have moved funds, got balance %d", balB)
 	}
 }
 
@@ -172,7 +246,7 @@ func TestTransfer_SameAccountRejected(t *testing.T) {
 func TestConcurrentWithdrawals_NoOverdraftAndInvariantHolds(t *testing.T) {
 	ctx := context.Background()
 	l, k, a := newTestStores(t)
-	svc := NewService(l, k, a)
+	svc := NewService(l, k, a, hardenedTestProfile())
 
 	acct, err := svc.CreateAccount(ctx, "owner-1")
 	if err != nil {
@@ -304,7 +378,7 @@ func TestOperations_ProduceDistinctEventAndTransactionIDs(t *testing.T) {
 	ctx := context.Background()
 
 	l, k, a := newTestStores(t)
-	svc1 := NewService(l, k, a)
+	svc1 := NewService(l, k, a, hardenedTestProfile())
 	acct, err := svc1.CreateAccount(ctx, "owner-1")
 	if err != nil {
 		t.Fatalf("CreateAccount: %v", err)
@@ -315,7 +389,7 @@ func TestOperations_ProduceDistinctEventAndTransactionIDs(t *testing.T) {
 
 	// A fresh Service instance against the SAME stores, simulating a
 	// separate CLI invocation.
-	svc2 := NewService(l, k, a)
+	svc2 := NewService(l, k, a, hardenedTestProfile())
 	if err := svc2.Deposit(ctx, owner("owner-1"), acct, 500); err != nil {
 		t.Fatalf("Deposit (svc2): %v", err)
 	}

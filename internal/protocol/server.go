@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -9,8 +10,13 @@ import (
 
 	"banksec-lab/internal/apperr"
 	"banksec-lab/internal/backend"
+	"banksec-lab/internal/config"
 	"banksec-lab/internal/domain"
 )
+
+var ErrReplayDetected = apperr.New(apperr.CodeConflict, "replayed sequence number")
+var ErrAuthFailed = apperr.New(apperr.CodeConflict, "auth tag verification failed")
+var ErrProfileDowngrade = apperr.New(apperr.CodeConflict, "crypto profile below server minimum")
 
 // Server serves requests from a single Client connection against a
 // backend.Service, until the connection closes or ctx is canceled.
@@ -19,12 +25,25 @@ type Server interface {
 }
 
 type pipeServer struct {
-	conn net.Conn
+	conn    net.Conn
+	mac     MACFunc
+	macKey  []byte
+	profile config.SecurityProfile
+
+	// lastSeen is the highest Seq accepted so far on this connection.
+	// Only tracked/enforced when profile.ProtocolAuthEnforced is true --
+	// vulnerable mode does not track it at all, the deliberately
+	// exploitable replay surface.
+	lastSeen uint64
 }
 
-// NewServer wraps conn as a Server.
-func NewServer(conn net.Conn) Server {
-	return &pipeServer{conn: conn}
+// NewServer wraps conn as a Server. mac/macKey verify every frame's
+// AuthTag; profile gates replay/tamper/downgrade enforcement
+// (ProtocolAuthEnforced) and sets the accepted crypto-profile floor
+// (MinAcceptedCryptoProfile). See NewClient's doc comment for the macKey
+// uniqueness requirement and the response-authentication deferral.
+func NewServer(conn net.Conn, mac MACFunc, macKey []byte, profile config.SecurityProfile) Server {
+	return &pipeServer{conn: conn, mac: mac, macKey: macKey, profile: profile}
 }
 
 func (s *pipeServer) Serve(ctx context.Context, svc backend.Service) error {
@@ -47,15 +66,19 @@ func (s *pipeServer) Serve(ctx context.Context, svc backend.Service) error {
 		}
 
 		var resp Response
-		var req Request
-		if err := json.Unmarshal(reqFrame.Payload, &req); err != nil {
-			// Reply with an error instead of returning: a Client is
-			// blocked in readFrame waiting for exactly this response,
-			// and dying here would hang it forever rather than
-			// surfacing the problem.
-			resp = errorResponse(apperr.Wrap(apperr.CodeValidation, "malformed request", err))
+		if rejectErr := s.checkFrameSecurity(reqFrame); rejectErr != nil {
+			resp = errorResponse(rejectErr)
 		} else {
-			resp = dispatch(ctx, svc, req)
+			var req Request
+			if err := json.Unmarshal(reqFrame.Payload, &req); err != nil {
+				// Reply with an error instead of returning: a Client is
+				// blocked in readFrame waiting for exactly this response,
+				// and dying here would hang it forever rather than
+				// surfacing the problem.
+				resp = errorResponse(apperr.Wrap(apperr.CodeValidation, "malformed request", err))
+			} else {
+				resp = dispatch(ctx, svc, req)
+			}
 		}
 
 		payload, err := json.Marshal(resp)
@@ -66,6 +89,37 @@ func (s *pipeServer) Serve(ctx context.Context, svc backend.Service) error {
 			return fmt.Errorf("write response: %w", err)
 		}
 	}
+}
+
+// checkFrameSecurity enforces tamper, downgrade, and replay protection.
+// All three are gated by ProtocolAuthEnforced -- vulnerable mode performs
+// none of them, the deliberately exploitable surface for Task I2.
+//
+// Order matters: the tag is verified (over Version+Seq+CryptoProf+Payload,
+// via macInput) before lastSeen is ever advanced. Advancing lastSeen on an
+// unauthenticated frame would let a forged high-Seq frame permanently
+// block every subsequent legitimate request on this connection, even
+// though the forged frame itself gets rejected -- a denial-of-service
+// found in Milestone 3's security review.
+func (s *pipeServer) checkFrameSecurity(f Frame) error {
+	if !s.profile.ProtocolAuthEnforced {
+		return nil
+	}
+
+	expectedTag := s.mac(s.macKey, macInput(f.Version, f.Seq, f.CryptoProf, f.Payload))
+	if !hmac.Equal(expectedTag, f.AuthTag) {
+		return ErrAuthFailed
+	}
+
+	if profileRank(f.CryptoProf) < profileRank(s.profile.MinAcceptedCryptoProfile) {
+		return ErrProfileDowngrade
+	}
+
+	if f.Seq <= s.lastSeen {
+		return ErrReplayDetected
+	}
+	s.lastSeen = f.Seq
+	return nil
 }
 
 func dispatch(ctx context.Context, svc backend.Service, req Request) Response {

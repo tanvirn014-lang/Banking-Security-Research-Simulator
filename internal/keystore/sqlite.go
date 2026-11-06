@@ -23,7 +23,8 @@ type sqliteStore struct {
 // NewSQLiteStore opens (creating if necessary) a key store at path. path
 // must be a different file than the ledger's, per ARCHITECTURE.md §7.
 func NewSQLiteStore(path string) (Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout: see internal/ledger/sqlite.go's NewSQLiteStore for why.
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open keystore %s: %w", path, err)
 	}

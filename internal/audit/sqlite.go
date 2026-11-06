@@ -23,7 +23,11 @@ type sqliteStream struct {
 // NewSQLiteStream opens (creating if necessary) an audit event stream at
 // path. path must be a different file than the ledger's and keystore's.
 func NewSQLiteStream(path string) (Stream, error) {
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout: see internal/ledger/sqlite.go's NewSQLiteStore for why
+	// -- concurrent writers (e.g. multiple backend operations recording
+	// audit events around the same time) must wait and retry, not fail
+	// outright with SQLITE_BUSY.
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open audit stream %s: %w", path, err)
 	}

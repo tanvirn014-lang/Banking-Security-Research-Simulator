@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +20,15 @@ import (
 	"banksec-lab/internal/ledger"
 	"banksec-lab/internal/protocol"
 )
+
+// hmacSHA256 is the placeholder MAC for the protocol's auth tag until
+// internal/crypto's Engine exists (Task C5 replaces it with the real
+// Engine's MAC/Sign, selected per the active profile).
+func hmacSHA256(key, data []byte) []byte {
+	h := hmac.New(sha256.New, key)
+	h.Write(data)
+	return h.Sum(nil)
+}
 
 // cliEnv names where a CLI invocation's persistent storage and security
 // profile live. Separate test runs use their own, isolated DataDir.
@@ -93,11 +105,10 @@ func paramsForOp(op, owner, account, from, to, amount string) (map[string]string
 // wireClient wires config/ledger/keystore/audit/backend/protocol per
 // ARCHITECTURE.md's order and returns a Client plus a cleanup function.
 // The loaded SecurityProfile is not yet threaded into backend/protocol
-// construction -- Milestone 3 does that; loading it here now still
-// validates the profile file eagerly and matches the documented wiring
-// order.
+// construction.
 func wireClient(env cliEnv) (protocol.Client, func(), error) {
-	if _, err := config.Load(env.ProfilePath); err != nil {
+	profile, err := config.Load(env.ProfilePath)
+	if err != nil {
 		return nil, nil, fmt.Errorf("load profile: %w", err)
 	}
 
@@ -121,14 +132,26 @@ func wireClient(env cliEnv) (protocol.Client, func(), error) {
 		return nil, nil, fmt.Errorf("open audit stream: %w", err)
 	}
 
-	svc := backend.NewService(l, k, a)
+	svc := backend.NewService(l, k, a, profile)
+
+	// A fresh per-invocation MAC key is enough: the client and server
+	// above are both constructed right here, in the same process, and
+	// never need to agree on a key across separate invocations. Task C5
+	// replaces this placeholder HMAC with internal/crypto's real Engine.
+	macKey := make([]byte, 32)
+	if _, err := rand.Read(macKey); err != nil {
+		l.Close()
+		k.Close()
+		a.Close()
+		return nil, nil, fmt.Errorf("generate MAC key: %w", err)
+	}
 
 	clientConn, serverConn := protocol.NewPipeTransport()
-	server := protocol.NewServer(serverConn)
+	server := protocol.NewServer(serverConn, hmacSHA256, macKey, profile)
 	ctx, cancel := context.WithCancel(context.Background())
 	go server.Serve(ctx, svc)
 
-	client := protocol.NewClient(clientConn)
+	client := protocol.NewClient(clientConn, hmacSHA256, macKey, profile)
 
 	cleanup := func() {
 		cancel()
