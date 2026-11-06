@@ -1,0 +1,10 @@
+{
+  "name": "vulnerable",
+  "crypto_profile": "standard",
+  "min_accepted_crypto_profile": "standard",
+  "protocol_auth_enforced": false,
+  "authz_enforced": false,
+  "keystore_encrypted_at_rest": false,
+  "audit_hash_chained": false,
+  "detection_rules": []
+}
