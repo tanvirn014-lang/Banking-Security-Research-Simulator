@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,6 +176,57 @@ func strPtr(s string) *string { return &s }
 // reported as ok=true, because it only checked that each stored row
 // linked correctly to its predecessor -- never that nothing was missing
 // off the end.
+// TestVerifyChain_NoFalsePositiveUnderConcurrentRecord is the regression
+// test for Milestone 8 security review finding I1: VerifyChain read the
+// checkpoint file and then scanned the events table as two separate,
+// unlocked steps. A concurrent Record landing in between (inserting a
+// row and advancing the checkpoint) made the row count VerifyChain
+// scanned disagree with the (now-stale) checkpoint count it had already
+// read, reporting a false "trailing event(s) missing" break -- even
+// though nothing was tampered, more was legitimately added. Worse,
+// combined with detection.auditChainRule's dedup latch, one false
+// positive permanently silenced the rule for any *real* later tamper.
+func TestVerifyChain_NoFalsePositiveUnderConcurrentRecord(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStreamAt(t, testsupport.TempSQLitePath(t), true)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		n := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			n++
+			_ = s.Record(ctx, Event{ID: fmt.Sprintf("bg-%d", n), Timestamp: time.Now(), Type: "op"})
+		}
+	}()
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	falsePositives := 0
+	for time.Now().Before(deadline) {
+		ok, brokenAt, err := s.VerifyChain(ctx)
+		if err != nil {
+			t.Fatalf("VerifyChain: %v", err)
+		}
+		if !ok {
+			falsePositives++
+			t.Logf("false positive: brokenAt=%v", brokenAt)
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	if falsePositives > 0 {
+		t.Fatalf("expected zero false positives from an untampered chain under concurrent Record, got %d", falsePositives)
+	}
+}
+
 func TestVerifyChain_DetectsTruncation(t *testing.T) {
 	ctx := context.Background()
 	path := testsupport.TempSQLitePath(t)

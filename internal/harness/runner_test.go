@@ -5,8 +5,6 @@ import (
 	"math/rand"
 	"testing"
 	"time"
-
-	"banksec-lab/internal/protocol"
 )
 
 func TestRunner_PopulatesResultFromEvidence(t *testing.T) {
@@ -80,7 +78,7 @@ func TestRunner_SameSeed_SameRandomSequenceObservedByExec(t *testing.T) {
 		var observed int64
 		s := Scenario{
 			ID: "test-seed",
-			Exec: func(ctx context.Context, client protocol.Client, priv PrivilegedAccess, rnd *rand.Rand) error {
+			Exec: func(ctx context.Context, env *Environment, rnd *rand.Rand) error {
 				observed = rnd.Int63()
 				return nil
 			},
@@ -111,7 +109,7 @@ func TestRunner_PanicInExec_ReturnsErrorInsteadOfCrashing(t *testing.T) {
 
 	s := Scenario{
 		ID: "test-panic",
-		Exec: func(ctx context.Context, client protocol.Client, priv PrivilegedAccess, rnd *rand.Rand) error {
+		Exec: func(ctx context.Context, env *Environment, rnd *rand.Rand) error {
 			panic("deliberate test panic")
 		},
 		Verify: func(ctx context.Context, o Oracle) (bool, Evidence, error) { return false, nil, nil },
@@ -134,7 +132,7 @@ func TestRunner_TimeoutExceeded_ReturnsErrorNotHang(t *testing.T) {
 	s := Scenario{
 		ID:      "test-timeout",
 		Timeout: 50 * time.Millisecond,
-		Exec: func(ctx context.Context, client protocol.Client, priv PrivilegedAccess, rnd *rand.Rand) error {
+		Exec: func(ctx context.Context, env *Environment, rnd *rand.Rand) error {
 			<-ctx.Done() // honors cancellation, but the test below also
 			// covers a non-cooperative Exec via the goroutine-based
 			// deadline enforcement in runExecWithDeadline.
@@ -165,7 +163,7 @@ func TestRunner_NonCooperativeExec_StillBoundedByTimeout(t *testing.T) {
 	s := Scenario{
 		ID:      "test-noncooperative",
 		Timeout: 50 * time.Millisecond,
-		Exec: func(ctx context.Context, client protocol.Client, priv PrivilegedAccess, rnd *rand.Rand) error {
+		Exec: func(ctx context.Context, env *Environment, rnd *rand.Rand) error {
 			// Deliberately ignores ctx -- a hostile/buggy attack
 			// implementation that never checks for cancellation.
 			time.Sleep(10 * time.Second)

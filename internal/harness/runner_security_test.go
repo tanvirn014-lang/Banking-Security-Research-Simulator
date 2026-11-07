@@ -5,8 +5,6 @@ import (
 	"math/rand"
 	"testing"
 	"time"
-
-	"banksec-lab/internal/protocol"
 )
 
 // TestRunner_ExecutionTimeMS_Populated is the regression test for
@@ -198,7 +196,7 @@ func TestRunner_AlreadyCancelledContext_StopsImmediately(t *testing.T) {
 	execCalls := 0
 	s := Scenario{
 		ID: "test-precancelled",
-		Exec: func(ctx context.Context, client protocol.Client, priv PrivilegedAccess, rnd *rand.Rand) error {
+		Exec: func(ctx context.Context, env *Environment, rnd *rand.Rand) error {
 			execCalls++
 			return nil
 		},

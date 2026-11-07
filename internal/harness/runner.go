@@ -182,7 +182,7 @@ func runExecRecovered(ctx context.Context, s Scenario, env *Environment, rnd *ra
 			err = fmt.Errorf("scenario %s: exec panicked: %v", s.ID, r)
 		}
 	}()
-	return s.Exec(ctx, env.Client, env.Priv, rnd)
+	return s.Exec(ctx, env, rnd)
 }
 
 // runVerifyWithDeadline mirrors runExecWithDeadline for Verify (see its

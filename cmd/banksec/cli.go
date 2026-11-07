@@ -162,7 +162,7 @@ func wireClient(env cliEnv) (protocol.Client, func(), error) {
 	// loudly here, not silently result in zero rules actually running
 	// while the profile still claims e.g. "hardened" (security review
 	// finding I6).
-	knownDetectionRules := []domain.DetectionRuleID{detection.BalanceInvariantRuleID}
+	knownDetectionRules := []domain.DetectionRuleID{detection.BalanceInvariantRuleID, detection.AuditChainRuleID}
 	if err := detection.ValidateDetectionRules(profile.DetectionRules, knownDetectionRules); err != nil {
 		l.Close()
 		k.Close()
@@ -178,6 +178,7 @@ func wireClient(env cliEnv) (protocol.Client, func(), error) {
 	// directly from a test.
 	detectionEngine := detection.NewEngine()
 	detection.RegisterConfigured(detectionEngine, detection.NewBalanceInvariantRule(l), profile.DetectionRules)
+	detection.RegisterConfigured(detectionEngine, detection.NewAuditChainRule(a), profile.DetectionRules)
 	if err := detectionEngine.Run(ctx, a); err != nil {
 		cancel()
 		l.Close()

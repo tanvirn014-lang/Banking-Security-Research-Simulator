@@ -90,6 +90,17 @@ var (
 	toyRSAD = computeToyRSAD()
 )
 
+// ToyRSAPublicKey returns the weak-educational profile's single, fixed,
+// globally-known toy RSA public key (modulus and public exponent) --
+// there is no per-identity key material at all, by design (see this
+// file's own doc comment). Exported so an attack scenario can obtain the
+// public key the way a real attacker against real RSA would (e.g. from
+// a certificate), then genuinely factor it, rather than the attack
+// needing to already know the private factors in advance.
+func ToyRSAPublicKey() (n, e *big.Int) {
+	return new(big.Int).Set(toyRSAN), new(big.Int).Set(toyRSAE)
+}
+
 func computeToyRSAD() *big.Int {
 	one := big.NewInt(1)
 	phi := new(big.Int).Mul(

@@ -7,5 +7,5 @@
   "atomicity_enforced": true,
   "keystore_encrypted_at_rest": true,
   "audit_hash_chained": true,
-  "detection_rules": ["balance-invariant-violation"]
+  "detection_rules": ["balance-invariant-violation", "audit-chain-violation"]
 }

@@ -4,8 +4,6 @@ import (
 	"context"
 	"math/rand"
 	"time"
-
-	"banksec-lab/internal/protocol"
 )
 
 // Evidence is whatever concrete facts a Scenario's Verify step gathered
@@ -39,12 +37,18 @@ type Scenario struct {
 	// called when Prereqs returns false.
 	Prereqs func(ctx context.Context, o Oracle) (ok bool, err error)
 	// Exec is this attack's execution method: it drives the simulator
-	// exactly as a real attacker would, through protocol.Client (the
-	// one real external entrypoint) and/or PrivilegedAccess (an
-	// insider-style bypass -- see privileged.go). rnd is a
-	// Runner-provided, seed-derived random source, for reproducible
-	// attacks that need randomness (e.g. race timing).
-	Exec func(ctx context.Context, client protocol.Client, priv PrivilegedAccess, rnd *rand.Rand) error
+	// exactly as a real attacker would, through env.Client (the one real
+	// external entrypoint -- type-assert to protocol.AttackClient for
+	// raw frame access, or call env.NewClientConnection for a genuinely
+	// separate concurrent connection) and/or env.Priv (an insider-style
+	// bypass -- see privileged.go). Taking the whole Environment, rather
+	// than just its Client/Priv fields, is what lets a scenario like the
+	// concurrent-overdraft race (Milestone 8) open additional
+	// connections against the same backend -- a single Client
+	// serializes its own Send calls, so real concurrency needs more than
+	// one. rnd is a Runner-provided, seed-derived random source, for
+	// reproducible attacks that need randomness (e.g. race timing).
+	Exec func(ctx context.Context, env *Environment, rnd *rand.Rand) error
 	// Verify is this attack's success criteria, impact measurement, and
 	// detection-result check, all in one: it inspects the Oracle (never
 	// Exec's own return value) and reports whether the attack actually

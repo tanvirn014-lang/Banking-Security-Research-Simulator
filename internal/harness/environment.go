@@ -53,6 +53,9 @@ type Environment struct {
 	keystore keystore.Store
 	audit    audit.Stream
 	cancel   context.CancelFunc
+	ctx      context.Context
+	svc      backend.Service
+	engine   crypto.Engine
 	// execWG tracks background goroutines runExecWithDeadline/
 	// runVerifyWithDeadline (runner.go) launch for a Scenario's Exec/
 	// Verify that outlives its own ctx -- Close gives them a bounded
@@ -115,7 +118,7 @@ func NewLocalEnvironment(profile config.SecurityProfile) (*Environment, error) {
 	// ID in profile.DetectionRules must fail loudly here, not silently
 	// result in zero rules actually running (security review finding
 	// I6).
-	knownDetectionRules := []domain.DetectionRuleID{detection.BalanceInvariantRuleID}
+	knownDetectionRules := []domain.DetectionRuleID{detection.BalanceInvariantRuleID, detection.AuditChainRuleID}
 	if err := detection.ValidateDetectionRules(profile.DetectionRules, knownDetectionRules); err != nil {
 		l.Close()
 		a.Close()
@@ -128,6 +131,7 @@ func NewLocalEnvironment(profile config.SecurityProfile) (*Environment, error) {
 
 	detectionEngine := detection.NewEngine()
 	detection.RegisterConfigured(detectionEngine, detection.NewBalanceInvariantRule(l), profile.DetectionRules)
+	detection.RegisterConfigured(detectionEngine, detection.NewAuditChainRule(a), profile.DetectionRules)
 	if err := detectionEngine.Run(ctx, a); err != nil {
 		cancel()
 		l.Close()
@@ -139,12 +143,9 @@ func NewLocalEnvironment(profile config.SecurityProfile) (*Environment, error) {
 
 	clientConn, serverConn := protocol.NewPipeTransport()
 	server := protocol.NewServer(serverConn, engine, serverKey, profile)
-	go server.Serve(ctx, svc)
-	client := protocol.NewClient(clientConn, engine, clientKey, profile)
 
-	return &Environment{
+	e := &Environment{
 		Profile:  profile,
-		Client:   client,
 		Oracle:   NewOracle(l, k, a),
 		Priv:     newPrivilegedAccess(ledgerPath, auditPath, keystorePath),
 		dir:      dir,
@@ -152,11 +153,96 @@ func NewLocalEnvironment(profile config.SecurityProfile) (*Environment, error) {
 		keystore: k,
 		audit:    a,
 		cancel:   cancel,
-	}, nil
+		ctx:      ctx,
+		svc:      svc,
+		engine:   engine,
+	}
+
+	// Tracked via e.trackGoroutine like NewClientConnection's server
+	// goroutine below: without this, Close's execWG.Wait() returned
+	// immediately while this Environment's own server goroutine was
+	// still live, so Close could tear down the stores while a dispatch
+	// was still in flight (security review finding M3).
+	done := e.trackGoroutine()
+	go func() {
+		defer done()
+		server.Serve(ctx, svc)
+	}()
+	e.Client = protocol.NewClient(clientConn, engine, clientKey, profile)
+
+	return e, nil
 }
 
-// Close releases every resource this Environment holds and removes its
-// temp directory.
+// GenerateTestKey generates a fresh key directly in this Environment's
+// keystore and returns both its metadata and plaintext material. This
+// is a test/scenario-fixture helper, not an attack primitive: nothing in
+// production (cmd/banksec, internal/backend, internal/protocol) actually
+// calls keystore.Store.Generate yet (a known architecture gap, ledgered
+// since Milestone 5), so there is no protocol-level operation a
+// Scenario's Exec could use to legitimately create a test key the way
+// every other scenario creates its fixtures (accounts, deposits) through
+// env.Client. Returning the plaintext material here is safe precisely
+// because this is fixture setup, not the attack being measured -- the
+// attack scenarios that use this (Milestone 8's key-management group)
+// separately read the key back through env.Priv.RawKeyBytes, which is
+// the actual thing being tested.
+func (e *Environment) GenerateTestKey(ctx context.Context, profile domain.CryptoProfileName) (keystore.KeyMeta, []byte, error) {
+	meta, err := e.keystore.Generate(ctx, profile)
+	if err != nil {
+		return keystore.KeyMeta{}, nil, fmt.Errorf("generate test key: %w", err)
+	}
+	material, _, err := e.keystore.Get(ctx, meta.ID)
+	if err != nil {
+		return keystore.KeyMeta{}, nil, fmt.Errorf("read back generated test key: %w", err)
+	}
+	return meta, material, nil
+}
+
+// RevokeTestKey revokes a key by ID directly in this Environment's
+// keystore. Another fixture helper, for the same reason GenerateTestKey
+// is one -- see its doc comment.
+func (e *Environment) RevokeTestKey(ctx context.Context, id string) error {
+	return e.keystore.Revoke(ctx, id)
+}
+
+// GetTestKey reads a key's material and metadata through
+// keystore.Store.Get -- the *normal*, intended access path a real
+// consumer would use (as opposed to env.Priv.RawKeyBytes, the insider
+// bypass this task's key-exposure scenario targets). Used by the
+// key-revocation scenario to confirm Get actually rejects a revoked key
+// for "new operations", per ATTACK_SURFACES.md §4.
+func (e *Environment) GetTestKey(ctx context.Context, id string) ([]byte, keystore.KeyMeta, error) {
+	return e.keystore.Get(ctx, id)
+}
+
+// NewClientConnection wires an additional protocol client/server pair
+// against this Environment's SAME backend.Service, over its own
+// in-memory pipe. A single Client serializes its own Send/SendRawFrame
+// calls (one full round trip at a time), and the protocol Server
+// processes one connection's frames strictly sequentially -- so
+// reaching genuinely concurrent requests into the backend (e.g. the
+// concurrent-overdraft race, ATTACK_SURFACES.md §1) requires separate
+// connections, not more goroutines calling one Client.
+func (e *Environment) NewClientConnection() (protocol.AttackClient, error) {
+	clientKey, serverKey, err := localAuthKeys(e.Profile.CryptoProfile)
+	if err != nil {
+		return nil, fmt.Errorf("generate protocol auth keys: %w", err)
+	}
+	clientConn, serverConn := protocol.NewPipeTransport()
+	server := protocol.NewServer(serverConn, e.engine, serverKey, e.Profile)
+	done := e.trackGoroutine()
+	go func() {
+		defer done()
+		server.Serve(e.ctx, e.svc)
+	}()
+	client := protocol.NewClient(clientConn, e.engine, clientKey, e.Profile)
+	ac, ok := client.(protocol.AttackClient)
+	if !ok {
+		return nil, fmt.Errorf("internal error: protocol.NewClient's result does not satisfy protocol.AttackClient")
+	}
+	return ac, nil
+}
+
 // Close releases every resource this Environment holds and removes its
 // temp directory. If a Scenario's Exec or Verify ignored its own ctx and
 // is still running in the background (see runner.go's goroutine-raced

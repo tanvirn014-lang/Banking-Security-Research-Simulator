@@ -80,6 +80,21 @@ func TestToyRSA_SignVerify_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestToyRSAPublicKey_MatchesInternalModulus is the regression test for
+// Milestone 8's cryptographic attack scenario: ToyRSAPublicKey must
+// expose the same modulus/exponent Sign/Verify actually use internally,
+// since "globally-known" (this file's own doc comment) is meaningless if
+// what's exposed doesn't match what's really used.
+func TestToyRSAPublicKey_MatchesInternalModulus(t *testing.T) {
+	n, e := ToyRSAPublicKey()
+	if n.Cmp(toyRSAN) != 0 {
+		t.Fatalf("ToyRSAPublicKey's n=%v does not match the internal toyRSAN=%v", n, toyRSAN)
+	}
+	if e.Cmp(toyRSAE) != 0 {
+		t.Fatalf("ToyRSAPublicKey's e=%v does not match the internal toyRSAE=%v", e, toyRSAE)
+	}
+}
+
 func TestToyRSA_FactorableWithinBudget(t *testing.T) {
 	const maxTrials = 1_000_000
 	n := new(big.Int).Set(toyRSAN)

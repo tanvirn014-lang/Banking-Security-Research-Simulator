@@ -198,13 +198,24 @@ func loadOrCreateCheckpoint(path string) (chainCheckpoint, error) {
 	return cp, nil
 }
 
+// saveCheckpoint writes cp via a temp file + rename, so a reader (e.g.
+// VerifyChain, or a separate process) can never observe a partially
+// -written file -- os.WriteFile alone is not atomic, and a torn read
+// here would itself look like a broken chain. On the same filesystem
+// (always true here: the temp file is a sibling of path), os.Rename is
+// atomic on POSIX and effectively atomic on Windows for same-volume
+// renames.
 func saveCheckpoint(path string, cp chainCheckpoint) error {
 	data, err := json.Marshal(cp)
 	if err != nil {
 		return fmt.Errorf("encode chain checkpoint: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write chain checkpoint %s: %w", path, err)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write chain checkpoint tmp file %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename chain checkpoint %s -> %s: %w", tmp, path, err)
 	}
 	return nil
 }
@@ -414,6 +425,17 @@ func (s *sqliteStream) VerifyChain(ctx context.Context) (ok bool, brokenAt *stri
 	if !s.hashChained {
 		return false, nil, ErrChainNotEnabled
 	}
+
+	// Must be consistent with Record's own critical section: without
+	// this lock, a concurrent Record landing between the checkpoint read
+	// below and the row scan could insert a row and advance the
+	// checkpoint in between, making the row count this call scans
+	// disagree with the (now-stale) checkpoint count it already read --
+	// a false "trailing event(s) missing" report even though nothing
+	// was tampered, more was legitimately added (security review finding
+	// I1, reproduced with a concurrent Record goroutine before this fix).
+	s.chainMu.Lock()
+	defer s.chainMu.Unlock()
 
 	cp, err := loadOrCreateCheckpoint(s.checkpointPath)
 	if err != nil {

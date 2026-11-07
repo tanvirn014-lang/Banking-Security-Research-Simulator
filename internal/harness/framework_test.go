@@ -4,8 +4,6 @@ import (
 	"context"
 	"math/rand"
 	"testing"
-
-	"banksec-lab/internal/protocol"
 )
 
 // TestRunner_NeverTrustsExecClaimOverOracle is the framework's central
@@ -20,7 +18,7 @@ func TestRunner_NeverTrustsExecClaimOverOracle(t *testing.T) {
 	execClaimedSuccess := false // a side channel the Oracle cannot see
 	s := Scenario{
 		ID: "test-stub-never-trusted",
-		Exec: func(ctx context.Context, client protocol.Client, priv PrivilegedAccess, rnd *rand.Rand) error {
+		Exec: func(ctx context.Context, env *Environment, rnd *rand.Rand) error {
 			execClaimedSuccess = true // "I did it!" -- but nothing real happened
 			return nil
 		},
@@ -59,7 +57,7 @@ func TestScenario_StopCondHaltsRepeatedAttempts(t *testing.T) {
 	attempts := 0
 	s := Scenario{
 		ID: "test-stopcond",
-		Exec: func(ctx context.Context, client protocol.Client, priv PrivilegedAccess, rnd *rand.Rand) error {
+		Exec: func(ctx context.Context, env *Environment, rnd *rand.Rand) error {
 			attempts++
 			return nil
 		},
@@ -90,13 +88,15 @@ func TestScenario_StopCondHaltsRepeatedAttempts(t *testing.T) {
 func TestRegistry_RegisterAndDiscover(t *testing.T) {
 	reg := NewRegistry()
 
-	a := Scenario{ID: "a", Category: "application"}
-	b := Scenario{ID: "b", Category: "protocol"}
-	c := Scenario{ID: "c", Category: "application"}
+	factories := []func() Scenario{
+		func() Scenario { return Scenario{ID: "a", Category: "application"} },
+		func() Scenario { return Scenario{ID: "b", Category: "protocol"} },
+		func() Scenario { return Scenario{ID: "c", Category: "application"} },
+	}
 
-	for _, s := range []Scenario{a, b, c} {
-		if err := reg.Register(s); err != nil {
-			t.Fatalf("Register(%s): %v", s.ID, err)
+	for _, f := range factories {
+		if err := reg.Register(f); err != nil {
+			t.Fatalf("Register(%s): %v", f().ID, err)
 		}
 	}
 
@@ -118,43 +118,101 @@ func TestRegistry_RegisterAndDiscover(t *testing.T) {
 
 // TestRegistry_RequiredConfigNotSharedWithCaller is the regression test
 // for security review finding M5: RequiredConfig is a map (a reference
-// type), so storing/returning a Scenario value by itself still aliases
-// the caller's own map -- mutating a map obtained from Register's
-// argument or from a ByID/All/ByCategory read could silently corrupt
-// the registry's own stored copy.
+// type), so returning a Scenario value by itself still aliases whatever
+// map a factory happens to close over -- mutating a map read back from
+// ByID/All/ByCategory must not corrupt what a later read sees.
 func TestRegistry_RequiredConfigNotSharedWithCaller(t *testing.T) {
 	reg := NewRegistry()
 
-	original := map[string]string{"crypto_profile": "standard"}
-	if err := reg.Register(Scenario{ID: "shared-config", RequiredConfig: original}); err != nil {
+	factory := func() Scenario {
+		return Scenario{ID: "shared-config", RequiredConfig: map[string]string{"crypto_profile": "standard"}}
+	}
+	if err := reg.Register(factory); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	original["crypto_profile"] = "mutated-after-register"
 
 	got, ok := reg.ByID("shared-config")
 	if !ok {
 		t.Fatalf("expected to find the registered scenario")
 	}
-	if got.RequiredConfig["crypto_profile"] != "standard" {
-		t.Fatalf("expected the registry's stored RequiredConfig to be unaffected by mutating the caller's original map, got %v", got.RequiredConfig)
-	}
-
 	got.RequiredConfig["crypto_profile"] = "mutated-via-returned-copy"
+
 	again, _ := reg.ByID("shared-config")
 	if again.RequiredConfig["crypto_profile"] != "standard" {
-		t.Fatalf("expected mutating a map returned by ByID to not affect the registry's stored copy, got %v", again.RequiredConfig)
+		t.Fatalf("expected mutating a map returned by one ByID call to not affect a later one, got %v", again.RequiredConfig)
 	}
 }
 
 func TestRegistry_DuplicateIDRejected(t *testing.T) {
 	reg := NewRegistry()
-	if err := reg.Register(Scenario{ID: "dup"}); err != nil {
+	factory := func() Scenario { return Scenario{ID: "dup"} }
+	if err := reg.Register(factory); err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
-	if err := reg.Register(Scenario{ID: "dup"}); err == nil {
+	if err := reg.Register(factory); err == nil {
 		t.Fatalf("expected registering a duplicate ID to fail")
 	}
 	if len(reg.All()) != 1 {
 		t.Fatalf("expected the duplicate registration to have no effect, got %d scenarios", len(reg.All()))
+	}
+}
+
+// TestRegistry_LookupsAreIndependent is the regression test for security
+// review finding I2: a Scenario value returned by ByID previously shared
+// its Exec/Verify closures' captured state with every other copy of the
+// same registered ID -- two separate ByID lookups of the same scenario,
+// run sequentially or concurrently, raced on or leaked results into each
+// other's state. Register now stores a factory and calls it fresh per
+// lookup, so each returned Scenario has its own independent state.
+func TestRegistry_LookupsAreIndependent(t *testing.T) {
+	reg := NewRegistry()
+	factory := func() Scenario {
+		var seen bool
+		return Scenario{
+			ID: "independent-lookup",
+			Exec: func(ctx context.Context, env *Environment, rnd *rand.Rand) error {
+				if seen {
+					t.Fatalf("test bug: this factory call's Exec ran more than once")
+				}
+				seen = true
+				return nil
+			},
+			Verify: func(ctx context.Context, o Oracle) (bool, Evidence, error) {
+				return seen, nil, nil
+			},
+		}
+	}
+	if err := reg.Register(factory); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	env := newTestEnvironment(t, "../../configs/hardened.json")
+	r := NewRunner()
+
+	first, ok := reg.ByID("independent-lookup")
+	if !ok {
+		t.Fatalf("expected to find the registered scenario")
+	}
+	firstResult, err := r.Run(context.Background(), first, env, 1)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if !firstResult.Success {
+		t.Fatalf("expected the first lookup's own run to succeed, got Success=false")
+	}
+
+	// A second, independent lookup must start with fresh state (seen=false
+	// again inside its own factory call), not inherit the first lookup's
+	// already-true seen.
+	second, ok := reg.ByID("independent-lookup")
+	if !ok {
+		t.Fatalf("expected to find the registered scenario")
+	}
+	secondResult, err := r.Run(context.Background(), second, env, 1)
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if !secondResult.Success {
+		t.Fatalf("expected the second, independent lookup's own run to also succeed on its own Exec, got Success=false")
 	}
 }
