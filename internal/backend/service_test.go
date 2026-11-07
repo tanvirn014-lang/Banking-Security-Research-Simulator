@@ -9,6 +9,7 @@ import (
 
 	"banksec-lab/internal/audit"
 	"banksec-lab/internal/config"
+	"banksec-lab/internal/crypto"
 	"banksec-lab/internal/domain"
 	"banksec-lab/internal/keystore"
 	"banksec-lab/internal/ledger"
@@ -35,17 +36,17 @@ func newTestStores(t *testing.T) (ledger.Store, keystore.Store, audit.Stream) {
 	}
 	t.Cleanup(func() { l.Close() })
 
-	k, err := keystore.NewSQLiteStore(testsupport.TempSQLitePath(t))
-	if err != nil {
-		t.Fatalf("keystore.NewSQLiteStore: %v", err)
-	}
-	t.Cleanup(func() { k.Close() })
-
-	a, err := audit.NewSQLiteStream(testsupport.TempSQLitePath(t))
+	a, err := audit.NewSQLiteStream(testsupport.TempSQLitePath(t), false)
 	if err != nil {
 		t.Fatalf("audit.NewSQLiteStream: %v", err)
 	}
 	t.Cleanup(func() { a.Close() })
+
+	k, err := keystore.NewSQLiteStore(testsupport.TempSQLitePath(t), crypto.NewEngine(), false, a)
+	if err != nil {
+		t.Fatalf("keystore.NewSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { k.Close() })
 
 	return l, k, a
 }

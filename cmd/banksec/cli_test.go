@@ -1,10 +1,17 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	_ "modernc.org/sqlite"
+
+	"banksec-lab/internal/audit"
 )
 
 func outputField(t *testing.T, out, key string) string {
@@ -126,4 +133,73 @@ func TestCLI_ForgedPrincipalStillRejectedServerSide(t *testing.T) {
 	if !strings.Contains(err.Error(), "unauthorized") {
 		t.Fatalf("expected a server-side unauthorized rejection, got: %v", err)
 	}
+}
+
+// breakLedgerInvariant inserts a single, unmatched entry directly into
+// the ledger.db file, bypassing the backend entirely -- simulating a bug
+// or an attacker writing straight to storage.
+func breakLedgerInvariant(t *testing.T, dataDir string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(dataDir, "ledger.db"))
+	if err != nil {
+		t.Fatalf("open raw ledger db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(
+		`INSERT INTO entries (tx_id, account_id, amount, timestamp) VALUES (?, ?, ?, ?)`,
+		"unbalanced-tx", "acct-1", 1, time.Now().UnixNano(),
+	); err != nil {
+		t.Fatalf("insert unbalanced entry: %v", err)
+	}
+}
+
+// TestDetectionEngine_RunsDuringNormalCLIOperation satisfies Milestone 6
+// Task 29's Review Focus #5: the Detection Engine must be proven to run
+// as part of normal backend operation -- wired into this CLI's own
+// wiring (wireClient) as a background component alongside the protocol
+// server -- not merely callable directly, as
+// TestDetectionEngine_RuleTriggersOnViolation (internal/detection) does.
+// This test never constructs a detection.Engine itself; it only drives
+// the CLI exactly as a user would.
+func TestDetectionEngine_RunsDuringNormalCLIOperation(t *testing.T) {
+	env := cliEnv{DataDir: t.TempDir(), ProfilePath: "../../configs/hardened.json"}
+
+	createOut, err := runCLI(env, []string{"create-account", "--owner", "owner-1"})
+	if err != nil {
+		t.Fatalf("create-account: %v", err)
+	}
+	acct := outputField(t, createOut, "account")
+
+	if _, err := runCLI(env, []string{"deposit", "--account", acct, "--amount", "1000", "--as", "owner-1"}); err != nil {
+		t.Fatalf("deposit: %v", err)
+	}
+
+	breakLedgerInvariant(t, env.DataDir)
+
+	// An ordinary CLI invocation -- the detection engine wired into
+	// wireClient must observe this invocation's own "backend" audit
+	// event and flag the violation introduced above, with no test code
+	// calling into internal/detection at all.
+	if _, err := runCLI(env, []string{"balance", "--account", acct, "--as", "owner-1"}); err != nil {
+		t.Fatalf("balance: %v", err)
+	}
+
+	// hardened.json sets audit_hash_chained=true, which wireClient passed
+	// to the real stream -- reopening here must use the same mode.
+	stream, err := audit.NewSQLiteStream(filepath.Join(env.DataDir, "audit.db"), true)
+	if err != nil {
+		t.Fatalf("audit.NewSQLiteStream: %v", err)
+	}
+	defer stream.Close()
+
+	events, err := stream.Since(context.Background(), time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("Since: %v", err)
+	}
+	for _, e := range events {
+		if e.Type == "detection" {
+			return
+		}
+	}
+	t.Fatalf("expected a detection event recorded during normal CLI operation, found none among %d events: %+v", len(events), events)
 }

@@ -15,6 +15,7 @@ import (
 	"banksec-lab/internal/backend"
 	"banksec-lab/internal/config"
 	"banksec-lab/internal/crypto"
+	"banksec-lab/internal/detection"
 	"banksec-lab/internal/domain"
 	"banksec-lab/internal/keystore"
 	"banksec-lab/internal/ledger"
@@ -131,16 +132,17 @@ func wireClient(env cliEnv) (protocol.Client, func(), error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open ledger: %w", err)
 	}
-	k, err := keystore.NewSQLiteStore(filepath.Join(env.DataDir, "keystore.db"))
+	a, err := audit.NewSQLiteStream(filepath.Join(env.DataDir, "audit.db"), profile.AuditHashChained)
 	if err != nil {
 		l.Close()
-		return nil, nil, fmt.Errorf("open keystore: %w", err)
-	}
-	a, err := audit.NewSQLiteStream(filepath.Join(env.DataDir, "audit.db"))
-	if err != nil {
-		l.Close()
-		k.Close()
 		return nil, nil, fmt.Errorf("open audit stream: %w", err)
+	}
+	engine := crypto.NewEngine()
+	k, err := keystore.NewSQLiteStore(filepath.Join(env.DataDir, "keystore.db"), engine, profile.KeystoreEncryptedAtRest, a)
+	if err != nil {
+		l.Close()
+		a.Close()
+		return nil, nil, fmt.Errorf("open keystore: %w", err)
 	}
 
 	svc := backend.NewService(l, k, a, profile)
@@ -156,10 +158,24 @@ func wireClient(env cliEnv) (protocol.Client, func(), error) {
 		return nil, nil, fmt.Errorf("generate protocol auth keys: %w", err)
 	}
 
-	engine := crypto.NewEngine()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Wired as a background goroutine alongside the protocol server
+	// below (Milestone 6, Task 29, Review Focus #5): the Detection
+	// Engine must run as part of normal operation, not only be callable
+	// directly from a test.
+	detectionEngine := detection.NewEngine()
+	detectionEngine.Register(detection.NewBalanceInvariantRule(l))
+	if err := detectionEngine.Run(ctx, a); err != nil {
+		cancel()
+		l.Close()
+		k.Close()
+		a.Close()
+		return nil, nil, fmt.Errorf("run detection engine: %w", err)
+	}
+
 	clientConn, serverConn := protocol.NewPipeTransport()
 	server := protocol.NewServer(serverConn, engine, serverKey, profile)
-	ctx, cancel := context.WithCancel(context.Background())
 	go server.Serve(ctx, svc)
 
 	client := protocol.NewClient(clientConn, engine, clientKey, profile)

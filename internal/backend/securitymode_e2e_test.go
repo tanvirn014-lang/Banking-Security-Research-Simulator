@@ -67,16 +67,16 @@ func TestSecurityMode_FullDifferential(t *testing.T) {
 				t.Fatalf("ledger.NewSQLiteStore: %v", err)
 			}
 			t.Cleanup(func() { l.Close() })
-			k, err := keystore.NewSQLiteStore(testsupport.TempSQLitePath(t))
-			if err != nil {
-				t.Fatalf("keystore.NewSQLiteStore: %v", err)
-			}
-			t.Cleanup(func() { k.Close() })
-			a, err := audit.NewSQLiteStream(testsupport.TempSQLitePath(t))
+			a, err := audit.NewSQLiteStream(testsupport.TempSQLitePath(t), false)
 			if err != nil {
 				t.Fatalf("audit.NewSQLiteStream: %v", err)
 			}
 			t.Cleanup(func() { a.Close() })
+			k, err := keystore.NewSQLiteStore(testsupport.TempSQLitePath(t), crypto.NewEngine(), false, a)
+			if err != nil {
+				t.Fatalf("keystore.NewSQLiteStore: %v", err)
+			}
+			t.Cleanup(func() { k.Close() })
 
 			svc := backend.NewService(l, k, a, tc.profile)
 
