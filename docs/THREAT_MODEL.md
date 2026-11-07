@@ -1,6 +1,9 @@
 # BankSec Lab — Threat Model
 
-**Status:** Approved design, pre-implementation
+**Status:** Implemented. Reviewed against the actual code during
+Milestone 13's documentation pass; one correction noted inline below
+(§5) where the original design's authorization model was only partially
+realized.
 **Scope:** This document describes threats *within* the local synthetic
 simulator only. It is not a threat model for a real banking system, and no
 finding here implies anything about real-world banking security beyond the
@@ -61,7 +64,7 @@ Attack Harness --[protocol, attack path: application/protocol scenarios]--+
 | Database/ledger | internal boundary (simulated insider access) | direct ledger tampering, ledger-integrity-invariant violation, audit-log tampering |
 | Key-management | internal boundary + protocol boundary | weak key storage (plaintext at rest), key access without authorization, lifecycle failures (no rotation/revocation enforcement) |
 | Cryptographic | protocol + internal | weak-educational profile exploited (toy RSA factoring, ECB pattern leakage, static IV reuse), compared against standard/PQC profiles |
-| AI-agent | protocol boundary (as a scripted client) | agent discovers and exploits the same vulnerabilities above within its bounded action set |
+| AI-agent | whichever boundary the selected scenario itself crosses (not a boundary of its own) | `internal/agent.Agent` is a bounded client of `internal/harness`'s existing Registry/Runner — it selects among registered scenarios (§9 of `ATTACK_SURFACES.md`) and executes them exactly as any other caller would, so it crosses the protocol boundary for application/protocol-category scenarios and the internal (`PrivilegedAccess`) boundary for ledger/key-management-category ones; it introduces no new boundary or capability |
 
 ## 4. Audit integrity
 
@@ -78,17 +81,29 @@ Attack Harness --[protocol, attack path: application/protocol scenarios]--+
 
 ## 5. Authorization model
 
-Two principal types (see `ARCHITECTURE.md` §8): account-owner and
-privileged operator. Authorization-boundary threats are expressed as:
-- an account-owner attempting an operator-only action, or
+**Corrected against the actual implementation** (the original design
+below described two authorization-boundary threats; only one was ever
+built): `domain` defines two principal roles,
+`RoleAccountOwner`/`RolePrivilegedOperator`, but **`RolePrivilegedOperator`
+is never consumed by any authorization check anywhere in the codebase**
+(confirmed by direct inspection: it appears nowhere outside its own
+constant definition in `internal/domain/domain.go`). The only
+authorization-boundary threat actually implemented and tested
+(`application-authz-bypass`, `docs/ATTACK_SURFACES.md` §9 row 2) is:
 - an account-owner attempting an action against an account they do not
   own.
 
-Vulnerable mode may omit one or both checks (configurable per-scenario, so
-each authorization scenario documents exactly which check is weakened).
-Hardened mode enforces both server-side, in the Backend — never trusting
-CLI-side validation (per spec §5.1, the CLI is explicitly not a trust
-boundary).
+"An account-owner attempting an operator-only action" — the original
+design's second authorization-boundary threat — was never built: there
+is no operator-only operation anywhere in `cmd/banksec`/
+`internal/backend` for such an attempt to even target. If a future
+milestone wants this threat class, it needs an actual operator-only
+operation to exist first, not just the role constant.
+
+`configs/vulnerable.json` disables the implemented check
+(`authz_enforced: false`); `configs/hardened.json` enforces it
+server-side, in the Backend — never trusting CLI-side validation (per
+spec §5.1, the CLI is explicitly not a trust boundary).
 
 ## 6. Explicit non-goals (restated from the source spec, binding here)
 

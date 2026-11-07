@@ -1,24 +1,31 @@
 # BankSec Lab — Architecture
 
-**Status:** Approved design, pre-implementation
+**Status:** Implemented (Milestones 1-13 complete; see
+`docs/MILESTONE_12_VERIFICATION_REPORT.md` for independently-verified
+evidence of this). This document is reviewed against the actual code,
+not the original pre-implementation design — every section below was
+checked during Milestone 13's documentation pass, and any place where
+the original plan was never built, or was built differently, says so
+explicitly rather than silently describing the plan as if it happened.
 **Source spec:** [BankSec_Lab_System_Specification.md](../BankSec_Lab_System_Specification.md)
+(the original design brief; treat it as historical intent, not current
+truth about the codebase — this document and `README.md` describe what
+actually exists).
 
 ## 1. Deployment model
 
 BankSec Lab is **one Go module, one OS process**. No microservices, no
-containers, no network infrastructure are required to run it. This is a
-deliberate departure from a naive reading of the spec's "protocol-level
-attacks" requirement, which could be misread as implying separate services —
-see §3 for how real protocol semantics are achieved without them.
+containers, no network infrastructure are required to run it.
 
-Supported execution modes:
-
-- **Default:** CLI and Attack Harness communicate with the Backend over an
-  in-memory transport (`net.Pipe`). No sockets are opened.
-- **Optional network mode:** the same protocol can be carried over real
-  loopback TCP (`127.0.0.1`), for experiments that specifically require real
-  network timing/replay behavior (e.g., measuring replay-window timing under
-  actual OS scheduling). Off by default.
+**As implemented, there is exactly one transport: `net.Pipe`**
+(`internal/protocol.NewPipeTransport`), used for every CLI session, every
+`internal/harness.Environment`, and every attack scenario. The original
+design also described an "optional network mode" (real loopback TCP, for
+experiments needing genuine network timing/jitter) — **this was never
+implemented**: no code anywhere in this repository calls `net.Listen` or
+opens a TCP socket (confirmed by direct inspection). If real-network
+timing experiments are wanted later, this would be new work, not a
+flag to flip.
 
 ## 2. Package layout
 
@@ -53,7 +60,7 @@ an in-process function call — serializing it would be security theater.
 | Backend (`internal/backend`) | business rules, transaction orchestration | protocol server | `ledger`, `keystore`, `crypto`, `audit` |
 | Ledger (`internal/ledger`) | double-entry storage, balance invariants | backend, harness (Oracle read + PrivilegedAccess write) | SQLite |
 | Keystore (`internal/keystore`) | key generation/storage/rotation/revocation | backend, harness (Oracle read + PrivilegedAccess write) | SQLite/file (separate DB from ledger) |
-| Crypto (`internal/crypto`) | the three crypto profiles | backend, harness | Go stdlib, `circl` |
+| Crypto (`internal/crypto`) | the three crypto profiles | backend, harness | Go stdlib only — as implemented, no third-party crypto library is used at all; see `CRYPTOGRAPHY.md` §1.3 for why the originally-planned `circl` fallback turned out unnecessary |
 | Audit (`internal/audit`) | event recording | backend, keystore, detection | append-only store |
 | Detection (`internal/detection`) | rule-based alerting | audit (subscribe + emit) | audit |
 | Harness (`internal/harness`) | scenario registration/execution, outcome adjudication | benchmark, agent, researcher | protocol (attack path, §1-2 categories), ledger/keystore/audit (Oracle read-only for all categories; PrivilegedAccess read-write for §3-4 categories) |
@@ -66,8 +73,8 @@ an in-process function call — serializing it would be security theater.
 
 ### 4.1 Protocol boundary (the only "real" wire boundary)
 
-`internal/protocol` defines a request/response message format carried over
-`net.Pipe` (default) or loopback TCP (optional):
+`internal/protocol` defines a request/response message format carried
+over `net.Pipe` (the only transport implemented — §1):
 
 - **Framing:** length-prefixed, versioned message envelope.
 - **Sequence number:** monotonically increasing per session; the server
@@ -176,18 +183,26 @@ side effect. Each attack category gets an isolated blast radius.
 
 ## 8. Identity / role model
 
-Beyond `Account` (a synthetic bank account), the system models two
-principal types:
-- **Account-owner** — may act on accounts they own (deposit, withdraw,
-  transfer, view own history).
-- **Privileged operator** (teller/admin analogue) — may act across
-  accounts (e.g., unlock/freeze an account, view any transaction history,
-  rotate keys).
+Beyond `Account` (a synthetic bank account), `internal/domain` defines
+two principal roles: `RoleAccountOwner` and `RolePrivilegedOperator`.
 
-Authorization-boundary attacks (§5.2 of `THREAT_MODEL.md`) are expressed as
-a principal attempting an operation outside its granted role — this
-requires at least these two principal types to be meaningfully expressible,
-per the brainstorming discussion.
+**As implemented, only `RoleAccountOwner` is functionally meaningful**
+(confirmed by direct inspection: `RolePrivilegedOperator` appears nowhere
+outside its own constant definition — no authorization check, CLI
+operation, or scenario ever branches on it). The originally-planned
+"privileged operator (teller/admin analogue) may act across accounts"
+capability — unlock/freeze an account, view any transaction history,
+rotate keys as an operator rather than the key's own owner — was never
+built. `internal/keystore`'s key rotation, for example, has no
+"operator" concept at all; it is a direct store operation with no
+caller-role check. See `THREAT_MODEL.md` §5 for the corresponding
+corrected authorization-boundary description.
+
+The one authorization-boundary attack actually implemented
+(`application-authz-bypass`, `ATTACK_SURFACES.md` §9) is an
+account-owner principal acting on an account it does not own — this is
+the only authorization boundary this system currently enforces or lets
+an attack scenario target.
 
 ## 9. Known architectural limitations (honest, as required)
 
@@ -196,11 +211,11 @@ per the brainstorming discussion.
   a Go-level contract (separate interface), not an OS security boundary.
   This is acceptable because the system's threat model explicitly excludes
   attacks against the host OS itself (see `THREAT_MODEL.md` §6, non-goals).
-- `net.Pipe` transport means timing-based protocol attacks (true network
-  jitter, real TCP retransmission behavior) are not representative unless
-  the optional loopback-TCP mode is used; results from the two transports
-  are not directly comparable and must be labeled with which transport was
-  used.
+- `net.Pipe` is the **only** transport implemented (§1 above) — there is
+  no real-network alternative to switch to, so timing-based protocol
+  attacks (true network jitter, real TCP retransmission behavior) are
+  categorically not representative of real-network conditions in this
+  system, not just "less representative without an optional mode enabled."
 - The Quantum subsystem's qubit bound (~16-20 qubits) means its Shor demo
   factors toy moduli (e.g., 15, 21, 35) only — this is not a statement
   about the practical security margin of any real key size used elsewhere

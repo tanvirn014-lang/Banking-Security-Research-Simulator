@@ -1,6 +1,15 @@
 # BankSec Lab — Attack Surfaces and Feasibility Matrix
 
-**Status:** Approved design, pre-implementation
+**Status:** Implemented (Milestones 7-9; see `internal/harness`,
+`internal/quantum`). §§1-7 below are the ORIGINAL pre-implementation
+design, kept for historical context since `docs/ATTACK_COVERAGE.md`
+already cites this document as its own source of truth for
+target/prerequisites/feasibility — corrected in place wherever the
+original plan turned out factually wrong against the real implementation
+(marked inline). §§9-10 are new, added during Milestone 13's
+documentation pass: the attack-surface matrix and data-leak matrix
+**as actually implemented**, built from `internal/harness/registry_scenarios.go`'s
+real registered scenarios, not the original plan.
 
 Every scenario below is bounded to the local simulator (per
 `THREAT_MODEL.md` §6) and must declare, at registration time: prerequisites,
@@ -115,7 +124,7 @@ by `internal/crypto` for new operations — **F**.
 | Execution | genuine state-vector simulation (complex amplitudes, unitary gates) of Shor's algorithm factoring a toy modulus (e.g., 15, 21, 35) and Grover's algorithm searching an unstructured space up to the qubit bound (~16-20 qubits) |
 | Expected impact | correct factorization / correct search result, demonstrating the algorithm's logic at toy scale |
 | Detection | N/A — this is an offline demonstration, not an attack against a running system |
-| Metrics | `execution_time_ms`, `memory_usage`, qubit count, circuit depth |
+| Metrics | **as implemented:** `CircuitTrace{QubitsUsed, GateOperations, OracleQueries, SimulatedCPUTimeMS, TheoreticalComplexity, Label}` (`internal/quantum/metrics.go`) — "circuit depth" in the original plan was renamed `GateOperations` during implementation once it became clear the field was never a true circuit-depth metric (see `QUANTUM_METHODOLOGY.md`/the Milestone 9 review finding M1); `memory_usage` was never implemented as a quantum-specific metric |
 | Tests | assert correct factorization/search result for fixed small inputs; assert the simulator raises an explicit, documented error (not a silent wrong answer) above the qubit bound |
 | Feasibility | **T**, explicitly and permanently — every output surface (CLI, exported results, documentation) must label this as a classical simulation of quantum algorithm logic, never as execution on quantum hardware, and never as a demonstrated attack against this system's real cryptographic keys (per `CRYPTOGRAPHY.md` §5) |
 
@@ -129,7 +138,94 @@ by `internal/crypto` for new operations — **F**.
 | Key-management | F | none |
 | Cryptographic (weak-educational) | F | none (math/big) |
 | Cryptographic (standard) | F | none (stdlib) |
-| Cryptographic (PQC: ML-KEM) | F | stdlib `crypto/mlkem` (verify version at implementation time) |
-| Cryptographic (PQC: ML-DSA) | L | `cloudflare/circl` |
+| Cryptographic (PQC: ML-KEM) | F | **as implemented:** none — Go 1.27.3 standard library `crypto/mlkem` |
+| Cryptographic (PQC: ML-DSA) | L (planned) | **as implemented:** none — Go 1.27.3 standard library `crypto/mldsa` superseded the planned `cloudflare/circl` fallback; see `CRYPTOGRAPHY.md` §1.3 |
 | AI-agent | F | none |
 | Quantum (Shor/Grover) | T | none (custom state-vector sim, math/cmplx) |
+| Quantum (classical RSA/discrete-log baselines) | F | none (`math/big`-free; plain `int`/`int64` arithmetic — added during Milestone 9, not in the original plan, as a real classical baseline to compare the quantum simulations' theoretical complexity against; see `QUANTUM_METHODOLOGY.md`) |
+
+## 9. Attack-surface matrix (as implemented)
+
+Every row is a real, registered `harness.Scenario` (verify with
+`go test -v ./internal/harness/... -run TestRegisterAllScenarios`), not
+a planned/aspirational entry. Source of truth:
+`internal/harness/registry_scenarios.go`'s `RegisterAllScenarios` and
+`docs/ATTACK_COVERAGE.md` (which this table summarizes; see that
+document for full test names and implementation notes per attack).
+
+| # | Scenario ID | Category | Target component | `configs/vulnerable.json` outcome | `configs/hardened.json` outcome |
+|---|---|---|---|---|---|
+| 1 | `application-concurrent-overdraft` | application | `internal/backend` | overdraft succeeds (race) | blocked (atomicity enforced) |
+| 2 | `application-authz-bypass` | application | `internal/backend` | unauthorized action succeeds | rejected |
+| 3 | `protocol-replay` | protocol | `internal/protocol` | replayed frame accepted | rejected (sequence check) |
+| 4 | `protocol-tamper` | protocol | `internal/protocol` | tampered frame accepted | rejected (auth tag) |
+| 5 | `protocol-downgrade` | protocol | `internal/protocol` | weaker profile accepted | rejected (minimum-profile floor) |
+| 6 | `ledger-tamper` | ledger | `internal/ledger` (via `PrivilegedAccess`) | undetected | detected (`balance-invariant-violation`) |
+| 7 | `audit-tamper` | ledger | `internal/audit` (via `PrivilegedAccess`) | undetected | detected (`audit-chain-violation`) |
+| 8 | `key-exposure` | key-management | `internal/keystore` (via `PrivilegedAccess`) | plaintext recovered | ciphertext only |
+| 9 | `key-revocation` | key-management | `internal/keystore` | rejected (see note) | rejected |
+
+Rows 10-11 do **not** use `configs/vulnerable.json`/`hardened.json` at
+all — they fork on a different, orthogonal axis (`weak-educational` vs.
+`standard` crypto profile, expressed as a literal `config.SecurityProfile`
+in the test file itself, not a `configs/*.json` file):
+
+| # | Scenario ID | Category | Target component | `weak-educational` outcome | `standard` outcome |
+|---|---|---|---|---|---|
+| 10 | `crypto-toy-rsa-factor-forge` | cryptographic | `internal/crypto` | signature forged | infeasible (no RSA modulus to factor — Ed25519/ML-DSA instead) |
+| 11 | `crypto-ecb-pattern-leakage` | cryptographic | `internal/crypto` | pattern leaked (ECB) | not leaked (AES-GCM) |
+
+**Note on row 9:** key revocation is **not** a vulnerable/hardened
+differential by design — `ATTACK_SURFACES.md` §4 itself frames it as the
+harness *verifying* that revocation holds, not an attack expected to
+succeed in one mode. Both `configs/vulnerable.json` and
+`configs/hardened.json` must reject a revoked key for new operations.
+
+**Not implemented (Unsupported, with technical reasons — §5 above and
+`ATTACK_COVERAGE.md` §5 have the full explanation):** small-parameter
+Diffie-Hellman discrete-log (no key-exchange primitive exists anywhere
+in `internal/crypto`), static-IV reuse detection (ECB mode has no IV
+concept to reuse — an inconsistency in the original design table, not a
+missed step).
+
+**AI-agent and benchmark are not separate attack surfaces** — they are
+*clients* of the 11 scenarios above (`internal/agent.Agent` selects and
+executes registered scenarios through the same `harness.Runner`/
+`Registry` every other caller uses; `internal/benchmark.RunComparative`/
+`RunSuite` do the same, repeatedly, for aggregate statistics). Neither
+package introduces a new exploitable surface of its own — see
+`ARCHITECTURE.md` §3's component matrix.
+
+**Quantum (`internal/quantum`) is structurally disconnected** from every
+row above — it never touches `internal/crypto`'s real keys or any
+scenario's state. See §7 above and `QUANTUM_METHODOLOGY.md` for its own,
+separate scope.
+
+## 10. Data-leak / impact matrix (as implemented)
+
+Which attacks actually populate `harness.Result`'s impact-measurement
+fields (`internal/harness/runner.go`'s `Evidence*` constants), verified
+by reading each scenario's own `Verify` function directly (not assumed):
+
+| Scenario ID | Impact field populated | What it measures |
+|---|---|---|
+| `application-concurrent-overdraft` | `RecordsCompromised` | the overdrawn amount (minor units) |
+| `application-authz-bypass` | `RecordsCompromised` | the balance read without authorization |
+| `protocol-replay` | `RecordsCompromised` | the duplicated deposit amount |
+| `protocol-tamper` | `RecordsCompromised` | the tampered transaction's amount |
+| `protocol-downgrade` | `RecordsCompromised` | the balance read over the downgraded connection |
+| `key-exposure` | `DataLeakedBytes` | the length, in bytes, of the actual key material recovered |
+| `crypto-toy-rsa-factor-forge` | `ComputationalCost` | trial-division attempts used to factor the modulus |
+| `ledger-tamper`, `audit-tamper` | `DetectionLatencyMS` only (no data-leak field) | time from tamper to detection — these two attacks break an *integrity* invariant, not a *confidentiality* one, so they report detection speed rather than a leaked quantity |
+| `key-revocation`, `crypto-ecb-pattern-leakage` | none | both report only `Success`/`Attempts` — revocation is a pass/fail control check, and ECB pattern leakage's "impact" (identical ciphertext blocks) is structural, not naturally expressed as a byte/record count |
+
+**Fields defined in the schema but never populated by any registered
+scenario, as of this writing:** `TimeToCompromiseMS` and
+`MemoryUsageBytes` (`internal/harness/runner.go`'s `Result` struct
+includes both; no `Exec`/`Verify` in `internal/harness/scenario_*.go`
+sets either Evidence key — confirmed by direct `grep` across every
+scenario file). A future scenario is free to populate them; this is
+disclosed so a benchmark consumer does not assume every field is always
+available (`internal/benchmark.Summarize`'s own `SampleSize` field exists
+precisely to make this kind of partial availability visible rather than
+silently fabricating a value — see `BENCHMARK_METHODOLOGY.md`).
