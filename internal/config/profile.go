@@ -15,6 +15,22 @@ var validCryptoProfiles = map[domain.CryptoProfileName]bool{
 	"pqc":              true,
 }
 
+// cryptoProfileRank gives crypto profiles the same comparable strength
+// ordering internal/protocol's profileRank uses, duplicated here because
+// internal/protocol imports this package (a shared helper would cycle).
+func cryptoProfileRank(name domain.CryptoProfileName) int {
+	switch name {
+	case "weak-educational":
+		return 0
+	case "standard":
+		return 1
+	case "pqc":
+		return 2
+	default:
+		return -1
+	}
+}
+
 // SecurityProfile describes which security controls are enabled for a run.
 type SecurityProfile struct {
 	Name                     string                   `json:"name"`
@@ -89,6 +105,10 @@ func Load(path string) (SecurityProfile, error) {
 	}
 	if !validCryptoProfiles[raw.MinAcceptedCryptoProfile] {
 		return empty, fmt.Errorf("profile %s: invalid min_accepted_crypto_profile %q", path, raw.MinAcceptedCryptoProfile)
+	}
+	if cryptoProfileRank(raw.CryptoProfile) < cryptoProfileRank(raw.MinAcceptedCryptoProfile) {
+		return empty, fmt.Errorf("profile %s: crypto_profile %q ranks below min_accepted_crypto_profile %q -- this server could never authenticate its own client's traffic",
+			path, raw.CryptoProfile, raw.MinAcceptedCryptoProfile)
 	}
 
 	return SecurityProfile{

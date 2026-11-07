@@ -25,6 +25,13 @@ type Frame struct {
 // readFrame to allocate that much before ever validating anything else.
 const MaxFrameSize uint32 = 1 << 20 // 1 MiB
 
+// MaxAuthTagSize bounds a frame's AuthTag for the same reason MaxFrameSize
+// bounds Payload. 64 KiB comfortably exceeds every tag this project
+// produces (HMAC-SHA256: 32 bytes; ML-DSA-44 signatures: 2420 bytes --
+// discovered to not fit the originally-chosen 1-byte length prefix by
+// Task C5's TestDowngrade_AllProfilePairs_RejectedWhenHardened).
+const MaxAuthTagSize uint32 = 1 << 16
+
 // Request is a client-to-server call. Params are string-encoded so the
 // CLI can build them directly from command-line flags.
 type Request struct {
@@ -41,9 +48,11 @@ type Response struct {
 }
 
 // Wire layout: Version(1) | Seq(8, BE) | CryptoProf-len(1) | CryptoProf |
-// Payload-len(4, BE) | Payload | AuthTag-len(1) | AuthTag.
-// CryptoProf and AuthTag are each capped at 255 bytes -- comfortably
-// larger than any profile name or MAC/signature this project produces.
+// Payload-len(4, BE) | Payload | AuthTag-len(4, BE) | AuthTag.
+// CryptoProf is capped at 255 bytes -- comfortably larger than any profile
+// name this project produces. AuthTag uses a 4-byte length (see
+// MaxAuthTagSize) because an ML-DSA-44 signature (2420 bytes) does not fit
+// a 1-byte prefix.
 
 func writeFrame(w io.Writer, f Frame) error {
 	cryptoProf := []byte(f.CryptoProf)
@@ -53,8 +62,8 @@ func writeFrame(w io.Writer, f Frame) error {
 	if len(f.Payload) > int(MaxFrameSize) {
 		return fmt.Errorf("frame payload too large: %d bytes (max %d)", len(f.Payload), MaxFrameSize)
 	}
-	if len(f.AuthTag) > 255 {
-		return fmt.Errorf("auth tag too long: %d bytes", len(f.AuthTag))
+	if uint32(len(f.AuthTag)) > MaxAuthTagSize {
+		return fmt.Errorf("auth tag too long: %d bytes (max %d)", len(f.AuthTag), MaxAuthTagSize)
 	}
 
 	var buf bytes.Buffer
@@ -68,7 +77,9 @@ func writeFrame(w io.Writer, f Frame) error {
 	binary.BigEndian.PutUint32(payloadLenBuf[:], uint32(len(f.Payload)))
 	buf.Write(payloadLenBuf[:])
 	buf.Write(f.Payload)
-	buf.WriteByte(byte(len(f.AuthTag)))
+	var authTagLenBuf [4]byte
+	binary.BigEndian.PutUint32(authTagLenBuf[:], uint32(len(f.AuthTag)))
+	buf.Write(authTagLenBuf[:])
 	buf.Write(f.AuthTag)
 
 	if _, err := w.Write(buf.Bytes()); err != nil {
@@ -110,11 +121,15 @@ func readFrame(r io.Reader) (Frame, error) {
 		return Frame{}, fmt.Errorf("read frame payload: %w", err)
 	}
 
-	var authTagLen [1]byte
-	if _, err := io.ReadFull(r, authTagLen[:]); err != nil {
+	var authTagLenBuf [4]byte
+	if _, err := io.ReadFull(r, authTagLenBuf[:]); err != nil {
 		return Frame{}, fmt.Errorf("read auth tag length: %w", err)
 	}
-	f.AuthTag = make([]byte, authTagLen[0])
+	authTagLen := binary.BigEndian.Uint32(authTagLenBuf[:])
+	if authTagLen > MaxAuthTagSize {
+		return Frame{}, fmt.Errorf("auth tag too large: %d bytes (max %d)", authTagLen, MaxAuthTagSize)
+	}
+	f.AuthTag = make([]byte, authTagLen)
 	if _, err := io.ReadFull(r, f.AuthTag); err != nil {
 		return Frame{}, fmt.Errorf("read auth tag: %w", err)
 	}

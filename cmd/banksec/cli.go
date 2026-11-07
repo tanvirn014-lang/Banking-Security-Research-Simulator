@@ -2,9 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/hmac"
+	"crypto/mldsa"
 	"crypto/rand"
-	"crypto/sha256"
 	"flag"
 	"fmt"
 	"io"
@@ -15,19 +14,31 @@ import (
 	"banksec-lab/internal/audit"
 	"banksec-lab/internal/backend"
 	"banksec-lab/internal/config"
+	"banksec-lab/internal/crypto"
 	"banksec-lab/internal/domain"
 	"banksec-lab/internal/keystore"
 	"banksec-lab/internal/ledger"
 	"banksec-lab/internal/protocol"
 )
 
-// hmacSHA256 is the placeholder MAC for the protocol's auth tag until
-// internal/crypto's Engine exists (Task C5 replaces it with the real
-// Engine's MAC/Sign, selected per the active profile).
-func hmacSHA256(key, data []byte) []byte {
-	h := hmac.New(sha256.New, key)
-	h.Write(data)
-	return h.Sum(nil)
+// protocolAuthKeys generates the client/server key material appropriate
+// for profile: a shared symmetric key for "standard"/"weak-educational"
+// (both sides use the same bytes), or a fresh ML-DSA keypair for "pqc"
+// (the client gets the private seed, the server gets the public key --
+// see protocol.NewClient's doc comment for why these differ).
+func protocolAuthKeys(profile domain.CryptoProfileName) (clientKey, serverKey []byte, err error) {
+	if profile == "pqc" {
+		sk, err := mldsa.GenerateKey(mldsa.MLDSA44())
+		if err != nil {
+			return nil, nil, fmt.Errorf("generate ML-DSA keypair: %w", err)
+		}
+		return sk.Bytes(), sk.PublicKey().Bytes(), nil
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, nil, fmt.Errorf("generate symmetric key: %w", err)
+	}
+	return key, key, nil
 }
 
 // cliEnv names where a CLI invocation's persistent storage and security
@@ -134,24 +145,24 @@ func wireClient(env cliEnv) (protocol.Client, func(), error) {
 
 	svc := backend.NewService(l, k, a, profile)
 
-	// A fresh per-invocation MAC key is enough: the client and server
+	// Fresh per-invocation key material is enough: the client and server
 	// above are both constructed right here, in the same process, and
-	// never need to agree on a key across separate invocations. Task C5
-	// replaces this placeholder HMAC with internal/crypto's real Engine.
-	macKey := make([]byte, 32)
-	if _, err := rand.Read(macKey); err != nil {
+	// never need to agree on a key across separate invocations.
+	clientKey, serverKey, err := protocolAuthKeys(profile.CryptoProfile)
+	if err != nil {
 		l.Close()
 		k.Close()
 		a.Close()
-		return nil, nil, fmt.Errorf("generate MAC key: %w", err)
+		return nil, nil, fmt.Errorf("generate protocol auth keys: %w", err)
 	}
 
+	engine := crypto.NewEngine()
 	clientConn, serverConn := protocol.NewPipeTransport()
-	server := protocol.NewServer(serverConn, hmacSHA256, macKey, profile)
+	server := protocol.NewServer(serverConn, engine, serverKey, profile)
 	ctx, cancel := context.WithCancel(context.Background())
 	go server.Serve(ctx, svc)
 
-	client := protocol.NewClient(clientConn, hmacSHA256, macKey, profile)
+	client := protocol.NewClient(clientConn, engine, clientKey, profile)
 
 	cleanup := func() {
 		cancel()

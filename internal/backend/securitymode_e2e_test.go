@@ -8,26 +8,19 @@ package backend_test
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"sync"
 	"testing"
 
 	"banksec-lab/internal/audit"
 	"banksec-lab/internal/backend"
 	"banksec-lab/internal/config"
+	"banksec-lab/internal/crypto"
 	"banksec-lab/internal/domain"
 	"banksec-lab/internal/keystore"
 	"banksec-lab/internal/ledger"
 	"banksec-lab/internal/protocol"
 	"banksec-lab/internal/testsupport"
 )
-
-func e2eTestMAC(key, data []byte) []byte {
-	h := hmac.New(sha256.New, key)
-	h.Write(data)
-	return h.Sum(nil)
-}
 
 func e2ePrincipal(id string) domain.Principal {
 	return domain.Principal{ID: domain.PrincipalID(id), Role: domain.RoleAccountOwner}
@@ -107,9 +100,10 @@ func TestSecurityMode_FullDifferential(t *testing.T) {
 			}
 
 			// --- 2. Protocol-layer differential (crypto-profile downgrade) ---
+			engine := crypto.NewEngine()
 			macKey := []byte("e2e-test-mac-key")
 			clientConn, serverConn := protocol.NewPipeTransport()
-			server := protocol.NewServer(serverConn, e2eTestMAC, macKey, tc.profile)
+			server := protocol.NewServer(serverConn, engine, macKey, tc.profile)
 			pctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			go server.Serve(pctx, svc)
@@ -118,7 +112,7 @@ func TestSecurityMode_FullDifferential(t *testing.T) {
 			// configured minimum -- the downgrade surface.
 			weakClientProfile := tc.profile
 			weakClientProfile.CryptoProfile = "weak-educational"
-			client := protocol.NewClient(clientConn, e2eTestMAC, macKey, weakClientProfile)
+			client := protocol.NewClient(clientConn, engine, macKey, weakClientProfile)
 
 			resp, err := client.Send(ctx, protocol.Request{Op: "create-account", Params: map[string]string{"owner": "owner-3"}})
 			if err != nil {

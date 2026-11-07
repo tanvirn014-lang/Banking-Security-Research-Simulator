@@ -95,6 +95,32 @@ func TestLoad_InvalidCryptoProfileRejected(t *testing.T) {
 	}
 }
 
+func TestLoad_CryptoProfileBelowMinimumRejected(t *testing.T) {
+	// A profile configured as e.g. crypto_profile=standard with
+	// min_accepted_crypto_profile=pqc can never authenticate its own
+	// traffic (the server would reject every frame its own client
+	// declares) -- Milestone 4's security review found this
+	// misconfiguration silently loaded without error.
+	path := writeTempProfile(t, `{
+		"name": "hardened",
+		"crypto_profile": "standard",
+		"min_accepted_crypto_profile": "pqc",
+		"protocol_auth_enforced": true,
+		"authz_enforced": true,
+		"atomicity_enforced": true,
+		"keystore_encrypted_at_rest": true,
+		"audit_hash_chained": true,
+		"detection_rules": []
+	}`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for crypto_profile ranked below min_accepted_crypto_profile, got none")
+	}
+	if !strings.Contains(err.Error(), "crypto_profile") || !strings.Contains(err.Error(), "min_accepted_crypto_profile") {
+		t.Fatalf("expected the error to name both fields, got: %v", err)
+	}
+}
+
 func TestLoad_MissingEnforcementFieldRejected(t *testing.T) {
 	// A profile that omits an enforcement field (here: atomicity_enforced)
 	// must not silently default to false (vulnerable) -- found in

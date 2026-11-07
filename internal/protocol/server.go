@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"context"
-	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -11,12 +10,14 @@ import (
 	"banksec-lab/internal/apperr"
 	"banksec-lab/internal/backend"
 	"banksec-lab/internal/config"
+	"banksec-lab/internal/crypto"
 	"banksec-lab/internal/domain"
 )
 
 var ErrReplayDetected = apperr.New(apperr.CodeConflict, "replayed sequence number")
 var ErrAuthFailed = apperr.New(apperr.CodeConflict, "auth tag verification failed")
 var ErrProfileDowngrade = apperr.New(apperr.CodeConflict, "crypto profile below server minimum")
+var ErrAuthSchemeMismatch = apperr.New(apperr.CodeConflict, "declared crypto profile's authentication scheme does not match server configuration")
 
 // Server serves requests from a single Client connection against a
 // backend.Service, until the connection closes or ctx is canceled.
@@ -25,10 +26,10 @@ type Server interface {
 }
 
 type pipeServer struct {
-	conn    net.Conn
-	mac     MACFunc
-	macKey  []byte
-	profile config.SecurityProfile
+	conn      net.Conn
+	engine    crypto.Engine
+	verifyKey []byte
+	profile   config.SecurityProfile
 
 	// lastSeen is the highest Seq accepted so far on this connection.
 	// Only tracked/enforced when profile.ProtocolAuthEnforced is true --
@@ -37,13 +38,15 @@ type pipeServer struct {
 	lastSeen uint64
 }
 
-// NewServer wraps conn as a Server. mac/macKey verify every frame's
-// AuthTag; profile gates replay/tamper/downgrade enforcement
-// (ProtocolAuthEnforced) and sets the accepted crypto-profile floor
-// (MinAcceptedCryptoProfile). See NewClient's doc comment for the macKey
-// uniqueness requirement and the response-authentication deferral.
-func NewServer(conn net.Conn, mac MACFunc, macKey []byte, profile config.SecurityProfile) Server {
-	return &pipeServer{conn: conn, mac: mac, macKey: macKey, profile: profile}
+// NewServer wraps conn as a Server. engine/verifyKey verify every
+// frame's AuthTag (see auth.go's verifyTag for how verifyKey's shape
+// depends on the frame's declared profile); profile gates replay/tamper/
+// downgrade enforcement (ProtocolAuthEnforced) and sets the accepted
+// crypto-profile floor (MinAcceptedCryptoProfile). See NewClient's doc
+// comment for the key-uniqueness requirement and the response-
+// authentication deferral.
+func NewServer(conn net.Conn, engine crypto.Engine, verifyKey []byte, profile config.SecurityProfile) Server {
+	return &pipeServer{conn: conn, engine: engine, verifyKey: verifyKey, profile: profile}
 }
 
 func (s *pipeServer) Serve(ctx context.Context, svc backend.Service) error {
@@ -91,28 +94,50 @@ func (s *pipeServer) Serve(ctx context.Context, svc backend.Service) error {
 	}
 }
 
-// checkFrameSecurity enforces tamper, downgrade, and replay protection.
+// checkFrameSecurity enforces downgrade, tamper, and replay protection.
 // All three are gated by ProtocolAuthEnforced -- vulnerable mode performs
 // none of them, the deliberately exploitable surface for Task I2.
 //
-// Order matters: the tag is verified (over Version+Seq+CryptoProf+Payload,
-// via macInput) before lastSeen is ever advanced. Advancing lastSeen on an
-// unauthenticated frame would let a forged high-Seq frame permanently
-// block every subsequent legitimate request on this connection, even
-// though the forged frame itself gets rejected -- a denial-of-service
-// found in Milestone 3's security review.
+// Order matters, in three ways:
+//  1. Downgrade is checked before the tag: if a frame declares a profile
+//     weaker than the configured minimum, there is no reason to even
+//     attempt verifying it under that untrusted scheme -- and for "pqc"
+//     vs. the symmetric profiles, the *kind* of verification differs
+//     (asymmetric vs. keyed-MAC), so attempting it first would also be
+//     more complex for no benefit.
+//  2. The scheme-match check is next: s.verifyKey has exactly one shape,
+//     matching s.profile.CryptoProfile (a shared symmetric secret for
+//     standard/weak-educational, an ML-DSA PUBLIC key for pqc -- see
+//     NewServer's doc comment). verifyTag picks its verification method
+//     from the frame's declared CryptoProf, not from s.profile.CryptoProfile,
+//     so without this check a pqc-configured server's public verifyKey
+//     would get used as an HMAC secret for any declared symmetric profile
+//     ranked at or above MinAcceptedCryptoProfile -- and an HMAC key need
+//     not be secret-shaped to produce a "valid" tag, so anyone who knows
+//     the (public, by design) key could forge authenticated requests.
+//     Found as Critical finding C1 in Milestone 4's security review.
+//  3. The tag is verified (over Version+Seq+CryptoProf+Payload, via
+//     macInput) before lastSeen is ever advanced. Advancing lastSeen on
+//     an unauthenticated frame would let a forged high-Seq frame
+//     permanently block every subsequent legitimate request on this
+//     connection, even though the forged frame itself gets rejected -- a
+//     denial-of-service found in Milestone 3's security review.
 func (s *pipeServer) checkFrameSecurity(f Frame) error {
 	if !s.profile.ProtocolAuthEnforced {
 		return nil
 	}
 
-	expectedTag := s.mac(s.macKey, macInput(f.Version, f.Seq, f.CryptoProf, f.Payload))
-	if !hmac.Equal(expectedTag, f.AuthTag) {
-		return ErrAuthFailed
-	}
-
 	if profileRank(f.CryptoProf) < profileRank(s.profile.MinAcceptedCryptoProfile) {
 		return ErrProfileDowngrade
+	}
+
+	if (f.CryptoProf == "pqc") != (s.profile.CryptoProfile == "pqc") {
+		return ErrAuthSchemeMismatch
+	}
+
+	ok, err := verifyTag(s.engine, f.CryptoProf, s.verifyKey, macInput(f.Version, f.Seq, f.CryptoProf, f.Payload), f.AuthTag)
+	if err != nil || !ok {
+		return ErrAuthFailed
 	}
 
 	if f.Seq <= s.lastSeen {
