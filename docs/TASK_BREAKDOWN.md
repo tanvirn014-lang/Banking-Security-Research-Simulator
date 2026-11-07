@@ -1,7 +1,5 @@
 # BankSec Lab Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Tasks within a milestone that the Dependency Graph marks parallel may run as separate concurrent task loops; everything else runs in the sequence given.
-
 **Goal:** Implement the complete BankSec Lab system across 13 milestones —
 foundation, core banking, security-mode differentiation, cryptography, key
 management, audit, attack framework and scenarios, quantum simulations,
@@ -43,8 +41,8 @@ see `IMPLEMENTATION_PLAN.md`'s deviation note), `IMPLEMENTATION_PLAN.md`,
 - `config.SecurityProfile` carries `AuthzEnforced bool` beyond
   `ARCHITECTURE.md` §5's listed fields (already added, Task F2) — a
   plan-level elaboration, not a spec change.
-- This is a real git repository (worktree `worktree-foundation-core-banking`);
-  commit at the end of every task as each task card specifies.
+- This is a real git repository; commit at the end of every task as
+  each task card specifies.
 - Every new shared value type (`AccountID`, `Money`, `TransactionID`,
   `PrincipalID`, `Role`, `CryptoProfileName`, `DetectionRuleID`) lives in
   `internal/domain`, not in the package that happens to use it first.

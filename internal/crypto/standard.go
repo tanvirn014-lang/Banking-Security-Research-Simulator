@@ -3,6 +3,7 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
@@ -72,4 +73,29 @@ func standardMAC(key, msg []byte) []byte {
 	h := hmac.New(sha256.New, key)
 	h.Write(msg)
 	return h.Sum(nil)
+}
+
+func standardGenerateKeyPair() (private, public []byte, err error) {
+	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, apperr.Wrap(apperr.CodeInternal, "generate X25519 key pair", err)
+	}
+	return priv.Bytes(), priv.PublicKey().Bytes(), nil
+}
+
+func standardDeriveSharedSecret(privateKey, peerPublicKey []byte) ([]byte, error) {
+	curve := ecdh.X25519()
+	priv, err := curve.NewPrivateKey(privateKey)
+	if err != nil {
+		return nil, apperr.Wrap(apperr.CodeValidation, "invalid X25519 private key", err)
+	}
+	peerPub, err := curve.NewPublicKey(peerPublicKey)
+	if err != nil {
+		return nil, apperr.Wrap(apperr.CodeValidation, "invalid X25519 peer public key", err)
+	}
+	secret, err := priv.ECDH(peerPub)
+	if err != nil {
+		return nil, apperr.Wrap(apperr.CodeValidation, "X25519 ECDH failed", err)
+	}
+	return secret, nil
 }

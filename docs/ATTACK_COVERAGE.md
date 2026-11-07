@@ -133,15 +133,15 @@ milestone's own `TASK_BREAKDOWN.md` draft only ever planned the first.
 |---|---|---|---|
 | Toy RSA brute-force factor + forge signature | **Implemented & Verified** | `crypto-toy-rsa-factor-forge` / `TestScenario_ToyRSAFactorAndForge_SucceedsWithinBudget`, `TestScenario_ToyRSAFactorAndForge_InfeasibleUnderStandardProfile` | — |
 | ECB-mode pattern detection | **Implemented & Verified** | `crypto-ecb-pattern-leakage` / `TestScenario_ECBPatternLeakage_WeakLeaksStandardDoesNot` | — |
-| Small-parameter Diffie-Hellman discrete-log | **Unsupported** | — | No Diffie-Hellman / key-exchange primitive exists anywhere in this codebase: `crypto.Engine` has no `KeyExchange` method, and the `standard` profile's own design-table-specified X25519 (`CRYPTOGRAPHY.md` §1.2) was never implemented either. This is the carried-forward X25519/DH gap first flagged in Milestone 4's security review and repeated in Milestones 5 and 7's reviews, still pending a user decision on how key exchange should be integrated into `crypto.Engine` and the wire protocol. Building a standalone toy DH disconnected from `crypto.Engine` would not "actually exercise its target component" (this milestone's own explicit requirement) and would misrepresent `ATTACK_SURFACES.md` §5's stated target (`internal/crypto`), the same overclaiming problem §7 explicitly warns against for the quantum scenarios. |
+| Small-parameter Diffie-Hellman discrete-log | **Implemented & Verified** | `crypto-dh-discrete-log` / `TestScenario_DiffieHellmanDiscreteLog_SucceedsWithinBudget`, `TestScenario_DiffieHellmanDiscreteLog_InfeasibleUnderStandardProfile` | Recovers a discrete logarithm in a deliberately small, fixed, documented toy DH group (`crypto.ToyDHPublicParams`) chosen to fit `internal/quantum`'s existing baby-step-giant-step budget — not a break of Diffie-Hellman in general, not a statement about real-world DH group sizes, and not a quantum result (the classical BSGS baseline only, no `quantum.Shor`/circuit code). Closes the long-standing X25519/DH gap noted earlier in this document. |
 | Static-IV reuse detection | **Unsupported** | — | `CRYPTOGRAPHY.md` §1.1's design table lists "IV handling: static/reused IV" as a property of weak-educational's symmetric primitive, separate from "Symmetric: AES in ECB mode" — but ECB mode has no IV/nonce concept at all, so there is nothing to reuse. This is an inconsistency in the approved design table itself (the two rows describe incompatible constructions), not a missed implementation step. Already noted as a deferred scope gap in Milestone 4's security review. |
 
-Both implemented scenarios target `internal/crypto` directly — no
+All three implemented scenarios target `internal/crypto` directly — no
 `env.Client`/`env.Priv`/`Oracle` involvement — since they are passive
 mathematical cryptanalysis, not actions against a running system
 ("Detection: N/A... a passive mathematical attack, not an observable
 system event," `ATTACK_SURFACES.md` §5). The weak-educational-vs-
-standard axis these two scenarios fork on is orthogonal to the
+standard axis these three scenarios fork on is orthogonal to the
 hardened-vs-vulnerable `SecurityProfile` axis every other scenario in
 this milestone uses, and is expressed as a `config.SecurityProfile`
 literal in the test file rather than a new `configs/*.json` file, since
@@ -151,11 +151,11 @@ it is not a deployment mode.
 
 | Status | Count |
 |---|---|
-| Implemented & Verified | 11 |
+| Implemented & Verified | 12 |
 | Partially implemented | 0 |
-| Unsupported | 2 (small-parameter DH discrete-log; static-IV reuse) |
+| Unsupported | 1 (static-IV reuse) |
 
-All 11 implemented scenarios are registered via
+All 12 implemented scenarios are registered via
 `harness.RegisterAllScenarios` (`internal/harness/registry_scenarios.go`),
 verified to register with no ID collisions and to report the correct
 per-category counts
@@ -163,7 +163,5 @@ per-category counts
 
 **Carried-forward open items, not this milestone's job to resolve**
 (flagged in earlier milestones' security reviews, still pending a user
-decision): X25519/small-parameter-DH was never implemented at the
-`crypto.Engine`/protocol level (Milestone 4); no production consumer
-sources protocol/backend key material from the keystore yet (Milestone
-5, Task 23).
+decision): no production consumer sources protocol/backend key material
+from the keystore yet (Milestone 5, Task 23).

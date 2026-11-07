@@ -24,6 +24,7 @@ func RegisterAllScenarios(reg Registry) error {
 		NewKeyRevocationScenario,
 		NewToyRSAFactorAndForgeScenario,
 		NewECBPatternLeakageScenario,
+		NewDiffieHellmanDiscreteLogScenario,
 	}
 	for _, factory := range factories {
 		if err := reg.Register(factory); err != nil {

@@ -18,6 +18,31 @@ type Engine interface {
 	Sign(profile domain.CryptoProfileName, key, msg []byte) ([]byte, error)
 	Verify(profile domain.CryptoProfileName, pubkey, msg, sig []byte) (bool, error)
 	MAC(profile domain.CryptoProfileName, key, msg []byte) ([]byte, error)
+
+	// GenerateKeyPair creates a fresh, ephemeral key-exchange keypair for
+	// profile. private must never be shared; public is safe to send to a
+	// peer over an (assumed, in this project) insecure channel.
+	//
+	// Key agreement alone does not authenticate the peer: nothing here
+	// proves "public" actually came from the party you intended to talk
+	// to. A man-in-the-middle who can intercept and replace public values
+	// in transit defeats both profiles equally. This project has no live
+	// handshake to attack that boundary on; this note exists so the
+	// primitive itself is never mistaken for a complete, authenticated
+	// key-agreement protocol.
+	GenerateKeyPair(profile domain.CryptoProfileName) (private, public []byte, err error)
+
+	// DeriveSharedSecret computes the secret two parties agree on, given
+	// this side's own private key (from GenerateKeyPair) and the peer's
+	// public key. Two calls -- (privA, pubB) and (privB, pubA) -- MUST
+	// produce byte-identical results.
+	//
+	// The returned bytes are the raw agreed secret, not a key: neither
+	// profile's output is suitable as a symmetric key without first
+	// passing through a key-derivation function. No caller in this
+	// codebase consumes this output as a key, so no KDF is added here --
+	// see CRYPTOGRAPHY.md's key-exchange section.
+	DeriveSharedSecret(profile domain.CryptoProfileName, privateKey, peerPublicKey []byte) ([]byte, error)
 }
 
 // ErrProfileNotImplemented is returned by every Engine method for a
@@ -89,6 +114,39 @@ func (engine) MAC(profile domain.CryptoProfileName, key, msg []byte) ([]byte, er
 		return standardMAC(key, msg), nil
 	case "weak-educational":
 		return weakMAC(key, msg), nil
+	default:
+		return nil, ErrProfileNotImplemented
+	}
+}
+
+func (engine) GenerateKeyPair(profile domain.CryptoProfileName) (private, public []byte, err error) {
+	switch profile {
+	case "standard":
+		return standardGenerateKeyPair()
+	case "weak-educational":
+		return weakDHGenerateKeyPair()
+	case "pqc":
+		// pqc's own key establishment happens via ML-KEM encapsulation
+		// inside Encrypt/Decrypt (pqc_kem.go) -- a two-message,
+		// asymmetric KEM shape that GenerateKeyPair/DeriveSharedSecret's
+		// symmetric generate-then-exchange shape does not fit. See
+		// CRYPTOGRAPHY.md's key-exchange section.
+		return nil, nil, ErrProfileNotImplemented
+	default:
+		return nil, nil, ErrProfileNotImplemented
+	}
+}
+
+func (engine) DeriveSharedSecret(profile domain.CryptoProfileName, privateKey, peerPublicKey []byte) ([]byte, error) {
+	switch profile {
+	case "standard":
+		return standardDeriveSharedSecret(privateKey, peerPublicKey)
+	case "weak-educational":
+		return weakDHDeriveSharedSecret(privateKey, peerPublicKey)
+	case "pqc":
+		// See GenerateKeyPair's "pqc" case above: ML-KEM's asymmetric
+		// encapsulation shape does not fit this method's signature.
+		return nil, ErrProfileNotImplemented
 	default:
 		return nil, ErrProfileNotImplemented
 	}

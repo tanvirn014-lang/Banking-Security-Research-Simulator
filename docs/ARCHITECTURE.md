@@ -66,8 +66,14 @@ an in-process function call — serializing it would be security theater.
 | Harness (`internal/harness`) | scenario registration/execution, outcome adjudication | benchmark, agent, researcher | protocol (attack path, §1-2 categories), ledger/keystore/audit (Oracle read-only for all categories; PrivilegedAccess read-write for §3-4 categories) |
 | Benchmark (`internal/benchmark`) | repeated runs, aggregation, export | researcher | harness, audit/detection |
 | Agent (`internal/agent`) | bounded policy over Observation -> Action | harness | harness (as its action surface) |
-| Quantum (`internal/quantum`) | standalone algorithm simulators | CLI, benchmark | none (no link to `crypto`'s real keys) |
+| Quantum (`internal/quantum`) | standalone algorithm simulators | CLI, benchmark, harness | none (no link to `crypto`'s real keys) |
 | Config (`internal/config`) | SecurityProfile definitions | cmd/banksec | consumed by backend/crypto/keystore at startup |
+
+`internal/harness` calling into `internal/quantum` (the
+`crypto-dh-discrete-log` scenario's use of the classical
+baby-step-giant-step baseline) is the first scenario to do so; it uses
+only the classical baseline, never `quantum.Shor`/circuit code, and
+never touches `internal/crypto`'s real keys.
 
 ## 4. Communication design
 

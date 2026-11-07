@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"errors"
 	"testing"
+
+	"banksec-lab/internal/domain"
 )
 
 func TestEncryptDecrypt_RoundTrip(t *testing.T) {
@@ -116,6 +118,117 @@ func TestMAC_TamperDetected(t *testing.T) {
 	}
 	if bytes.Equal(tag, tag2) {
 		t.Fatal("MAC did not change for different input")
+	}
+}
+
+func TestKeyExchange_RoundTrip_Standard(t *testing.T) {
+	e := NewEngine()
+	privA, pubA, err := e.GenerateKeyPair("standard")
+	if err != nil {
+		t.Fatalf("GenerateKeyPair A: %v", err)
+	}
+	privB, pubB, err := e.GenerateKeyPair("standard")
+	if err != nil {
+		t.Fatalf("GenerateKeyPair B: %v", err)
+	}
+
+	secretA, err := e.DeriveSharedSecret("standard", privA, pubB)
+	if err != nil {
+		t.Fatalf("DeriveSharedSecret A: %v", err)
+	}
+	secretB, err := e.DeriveSharedSecret("standard", privB, pubA)
+	if err != nil {
+		t.Fatalf("DeriveSharedSecret B: %v", err)
+	}
+	if !bytes.Equal(secretA, secretB) {
+		t.Fatalf("both sides must derive the same shared secret: got %x and %x", secretA, secretB)
+	}
+}
+
+func TestKeyExchange_Standard_GenerateKeyPairNeverRepeats(t *testing.T) {
+	e := NewEngine()
+	priv1, _, err := e.GenerateKeyPair("standard")
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	priv2, _, err := e.GenerateKeyPair("standard")
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	if bytes.Equal(priv1, priv2) {
+		t.Fatal("two GenerateKeyPair calls produced the same private key")
+	}
+}
+
+func TestKeyExchange_Standard_RejectsWrongWidthPrivateKey(t *testing.T) {
+	e := NewEngine()
+	if _, err := e.DeriveSharedSecret("standard", make([]byte, 31), make([]byte, 32)); err == nil {
+		t.Fatal("expected an error for a wrong-width X25519 private key, got none")
+	}
+}
+
+func TestKeyExchange_Standard_RejectsWrongLengthPeerPublicKey(t *testing.T) {
+	e := NewEngine()
+	priv, _, err := e.GenerateKeyPair("standard")
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	for _, badLen := range []int{0, 16, 33} {
+		if _, err := e.DeriveSharedSecret("standard", priv, make([]byte, badLen)); err == nil {
+			t.Fatalf("expected an error for a %d-byte peer public key, got none", badLen)
+		}
+	}
+}
+
+func TestKeyExchange_Standard_AllZeroPeerPublicKeyRejected(t *testing.T) {
+	// The well-known all-zero X25519 u-coordinate is a low-order point:
+	// crypto/ecdh.PrivateKey.ECDH documents that it returns an error
+	// when the computed shared secret would be all-zero.
+	e := NewEngine()
+	priv, _, err := e.GenerateKeyPair("standard")
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	zeroPub := make([]byte, 32)
+	if _, err := e.DeriveSharedSecret("standard", priv, zeroPub); err == nil {
+		t.Fatal("expected an error for an all-zero X25519 peer public key, got none")
+	}
+}
+
+// The weak-educational subtest has an inherent, negligible flake
+// probability (~1/toyDHQ, roughly 2e-6) since two independently
+// generated public keys could theoretically collide in that small toy
+// group; the standard subtest's 256-bit X25519 keyspace has no such
+// practical concern.
+func TestKeyExchange_WrongPeerKeyProducesDifferentSecret(t *testing.T) {
+	for _, profile := range []domain.CryptoProfileName{"weak-educational", "standard"} {
+		t.Run(string(profile), func(t *testing.T) {
+			e := NewEngine()
+			privA, _, err := e.GenerateKeyPair(profile)
+			if err != nil {
+				t.Fatalf("GenerateKeyPair A: %v", err)
+			}
+			_, pubB, err := e.GenerateKeyPair(profile)
+			if err != nil {
+				t.Fatalf("GenerateKeyPair B: %v", err)
+			}
+			_, pubC, err := e.GenerateKeyPair(profile)
+			if err != nil {
+				t.Fatalf("GenerateKeyPair C: %v", err)
+			}
+
+			secretAB, err := e.DeriveSharedSecret(profile, privA, pubB)
+			if err != nil {
+				t.Fatalf("DeriveSharedSecret A+B: %v", err)
+			}
+			secretAC, err := e.DeriveSharedSecret(profile, privA, pubC)
+			if err != nil {
+				t.Fatalf("DeriveSharedSecret A+C: %v", err)
+			}
+			if bytes.Equal(secretAB, secretAC) {
+				t.Fatal("deriving against two different peer public keys produced the same secret")
+			}
+		})
 	}
 }
 

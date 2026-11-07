@@ -19,31 +19,62 @@ presented as a secure implementation.
 
 ## 1. Three fixed crypto profiles
 
-`internal/crypto.Engine` exposes exactly three profiles (selected via
+`internal/crypto.Engine` exposes seven operations (selected via
 `domain.CryptoProfileName`, driven by `SecurityProfile`) across exactly
-five operations: `Encrypt`, `Decrypt`, `Sign`, `Verify`, `MAC` — see
-`internal/crypto/engine.go`. **There is no key-exchange/key-agreement
-method on `Engine` at all** (see §1.2's gap note below).
+three profiles — see `internal/crypto/engine.go`: the original five
+(`Encrypt`, `Decrypt`, `Sign`, `Verify`, `MAC`), plus
+`GenerateKeyPair`/`DeriveSharedSecret` (key exchange, §1.2). These two
+new methods are implemented directly on `Engine` rather than a separate
+interface: direct inspection confirms `engine struct{}` is the only
+concrete `Engine` implementation anywhere in this codebase, with zero
+mocks or fakes, so there is no second implementation or test double that
+a separate interface would spare from growing two unused methods.
+
+**Key agreement alone does not authenticate the peer**, for either
+profile: nothing in `GenerateKeyPair`/`DeriveSharedSecret` proves a
+received public key actually came from the party you intended to talk
+to. A man-in-the-middle who can intercept and replace public values in
+transit defeats both profiles equally (`internal/crypto/engine.go`'s own
+doc comment on both methods states this). This project has no live
+handshake anywhere in `internal/protocol` to attack that boundary on —
+see §6 item 3 below — so this is a documented property of the
+primitive, not a claim that it is fit to use unauthenticated in a real
+protocol.
 
 ### 1.1 weak-educational (`internal/crypto/weakeducational.go`)
 
 | Primitive | As implemented | Purpose |
 |---|---|---|
 | Asymmetric | a fixed, small toy RSA modulus (`ToyRSAPublicKey`) | brute-forceable by trial division within a bounded trial budget, for classical cryptanalysis demos (`internal/harness`'s `crypto-toy-rsa-factor-forge` scenario, `internal/quantum`'s classical RSA baseline) |
+| Key exchange | a fixed, small safe-prime subgroup DH group (`ToyDHPublicParams`, `weakDHGenerateKeyPair`/`weakDHDeriveSharedSecret`) | brute-forceable via classical baby-step-giant-step within a bounded budget, for the `crypto-dh-discrete-log` attack scenario |
 | Symmetric | AES in ECB mode (`weakECBEncrypt`/`weakECBDecrypt`) | demonstrates pattern leakage (identical plaintext blocks produce identical ciphertext blocks) |
 | MAC | HMAC-SHA-256 truncated to 4 bytes (`weakMAC`, `weakMACTruncatedLen`) | demonstrates a weak, brute-forceable tag length |
 
 **Not implemented, despite appearing in the original design table:**
-small-group Diffie-Hellman (no key-exchange primitive exists anywhere in
-this codebase — see §1.2) and static/reused-IV demonstration (ECB mode
-has no IV/nonce concept at all, so "IV handling" does not apply to it;
-this was an inconsistency in the original design table itself, not a
-missed implementation step — see `docs/ATTACK_COVERAGE.md` §5).
+static/reused-IV demonstration (ECB mode has no IV/nonce concept at all,
+so "IV handling" does not apply to it; this was an inconsistency in the
+original design table itself, not a missed implementation step — see
+`docs/ATTACK_COVERAGE.md` §5).
 
 All weak-educational constructs are built from stdlib primitives used
 *incorrectly on purpose*, or deliberately tiny `math/big` parameters —
 never a hand-rolled cipher. Every weak-educational output is labeled
 `"profile": "weak-educational"`.
+
+**Key exchange construction detail:** the toy DH group is a *safe
+prime* (`toyDHP = 2*toyDHQ + 1`, both prime) with `toyDHG` generating
+the order-`toyDHQ` subgroup — not an arbitrary prime modulus. This
+matters: in a group of composite order, a peer public key from a small
+subgroup (the trivial case being `1`) makes the derived secret
+predictable regardless of either party's private exponent.
+`weakDHDeriveSharedSecret` validates every peer public key for both
+range (`1 < y < p-1`) and subgroup membership (`y^toyDHQ mod p == 1`)
+before using it. `ToyDHPublicParams()` returns defensive copies,
+matching `ToyRSAPublicKey()`'s existing pattern. Both key-exchange
+methods return the **raw** agreed secret, not a key: neither this
+profile's nor the standard profile's output is suitable as a symmetric
+key without first passing through a key-derivation function. No caller
+in this codebase consumes this output as a key, so no KDF is added.
 
 ### 1.2 standard (`internal/crypto/standard.go`)
 
@@ -53,19 +84,20 @@ never a hand-rolled cipher. Every weak-educational output is labeled
 | MAC | HMAC-SHA-256, `crypto/hmac` + `crypto/sha256` |
 | Signatures | Ed25519, `crypto/ed25519` |
 
-**Gap, carried forward unresolved since Milestone 4's own security
-review, confirmed still true by direct code inspection as of Milestone
-12's verification pass:** the original design table also specified
-**X25519 key agreement** (`crypto/ecdh`) for the standard profile. It was
-never implemented — `Engine` has no key-exchange method, and no code
-anywhere in this repository imports `crypto/ecdh` or performs a
-Diffie-Hellman-style key agreement. This is why the small-parameter
-Diffie-Hellman discrete-log attack (`ATTACK_SURFACES.md` §5) is marked
-**Unsupported**, not merely unimplemented: there is no real target
-component for it to exercise. This has been flagged in every
-whole-branch security review since Milestone 4 and remains an open
-design question for the user: how key exchange should be integrated
-into `Engine` and the wire protocol, if it is wanted at all.
+**Implemented** (closing the gap carried forward since Milestone 4's
+security review, repeated through Milestone 12's verification pass):
+the original design table's **X25519 key agreement** (`crypto/ecdh`)
+for the standard profile. `standardGenerateKeyPair` uses
+`ecdh.X25519().GenerateKey(rand.Reader)`;
+`standardDeriveSharedSecret` reconstructs both keys via `crypto/ecdh`
+and calls `PrivateKey.ECDH` — propagating its errors unchanged,
+including its documented rejection of an all-zero (low-order peer
+public key) result. This is why the small-parameter Diffie-Hellman
+discrete-log attack (`ATTACK_SURFACES.md` §9) is now **Implemented &
+Verified**: there is a real target component (the weak-educational
+profile's own DH primitive, §1.1) for it to exercise. Key agreement
+alone does not authenticate the peer — see §1 above, which applies
+identically to both profiles.
 
 ### 1.3 post-quantum (`internal/crypto/pqc_kem.go`, `pqc_dsa.go`)
 
@@ -84,11 +116,25 @@ Signing is deterministic (`SignDeterministic`, not the randomized
 `Sign`), for the same reproducibility reason the rest of this project
 favors determinism (`ARCHITECTURE.md`'s reproducibility principle).
 
+**`GenerateKeyPair`/`DeriveSharedSecret` return `ErrProfileNotImplemented`
+for `"pqc"`, as a considered decision, not a gap:** `"pqc"`'s own key
+establishment already happens via ML-KEM encapsulation inside
+`Encrypt`/`Decrypt` above — a two-message, asymmetric KEM shape (one
+side generates a keypair; the *other* side encapsulates against that
+public key, producing both a ciphertext and the shared secret in one
+step) that does not fit `GenerateKeyPair`/`DeriveSharedSecret`'s
+symmetric generate-then-exchange-then-derive shape (there is no
+equivalent "the first side also calls `DeriveSharedSecret`" step in
+KEM). Forcing ML-KEM into this signature would misrepresent how it
+actually works.
+
 **Not implemented:** a hybrid classical+PQC mode (e.g. X25519 + ML-KEM
 combined). The original design described this as "matching current
 real-world PQC migration practice," but it was never built — `"pqc"` is
-pure ML-KEM/ML-DSA only, and (per §1.2's gap) there is no X25519
-implementation to combine it with anyway.
+pure ML-KEM/ML-DSA only. §1.2's X25519 implementation exists as a
+standalone `standard`-profile primitive now, but nothing combines its
+output with `"pqc"`'s ML-KEM output; building that combination remains
+a separate, unimplemented gap.
 
 ## 2. Weak-construct parameter bounds
 
@@ -98,6 +144,21 @@ randomly generated per run**: `N = 997 × 1009 = 1,006,573` (~20 bits,
 bounds are stable across repeated experiments — a trial-division attack
 against it (`internal/harness`'s `crypto-toy-rsa-factor-forge` scenario)
 is bounded to 1,000,000 trials.
+
+Similarly, the weak-educational toy DH group is also fixed: `toyDHQ =
+490481`, `toyDHP = 2*toyDHQ + 1 = 980963` (~20 bits, `ToyDHPublicParams`),
+a safe prime deliberately kept below `internal/quantum`'s own
+`MaxDiscreteLogModulus = 1,000,000` — the baby-step-giant-step attack
+(`crypto-dh-discrete-log` scenario) sizes its cost from `toyDHP` itself,
+not from the smaller `toyDHQ`, so `toyDHP` is what had to stay inside
+that budget. **Unlike the toy RSA modulus's fixed trial count,** the DH
+group's parameters are fixed but each party's *keypair* is not: every
+call to `weakDHGenerateKeyPair`/`standardGenerateKeyPair` sources its
+private value from `crypto/rand`, not from a scenario's seed — so
+`crypto-dh-discrete-log`'s exact `ComputationalCost` (baby-step-
+giant-step's operation count) varies run to run even at a fixed seed,
+though whether the attack succeeds at all does not (see
+`ATTACK_SURFACES.md` §10 for the full disclosure).
 
 This is a **different, larger** modulus than `internal/quantum`'s own
 toy RSA inputs (`n ∈ {15, 21, 35}`, used for the genuinely-simulated
@@ -174,16 +235,17 @@ through for cryptographic operations (`internal/backend`,
    `CryptoProfile`/`MinAcceptedCryptoProfile` fields, and
    `internal/protocol`'s `profileRank` downgrade-detection logic, also
    need to know about a new profile's relative strength ranking.
-3. **Adding key exchange** (closing the §1.2 gap, if ever undertaken):
-   this needs a new `Engine` method (there is no `KeyExchange` method to
-   extend today), a design decision on how the protocol layer
-   (`internal/protocol`) would carry the exchange (a new frame type? an
-   extension to the existing handshake, which today has none — auth keys
-   are provisioned out-of-band per connection, see
-   `internal/protocol/client.go`'s own doc comment on `NewClient`), and
-   should start with its own `superpowers:brainstorming`-style scoping
-   pass given how much of the wire protocol currently assumes no
-   handshake exists at all.
+3. **Key exchange** (closing the former §1.2 gap): done, as a
+   primitive only — see §1.1/§1.2 above and
+   See this project's design notes for the full design and its scope
+   decisions. `internal/protocol`'s
+   wire format is untouched: there is still no live handshake anywhere
+   in this system, and `NewClient`/`NewServer` are still handed a
+   pre-provisioned session key exactly as before. Wiring key exchange
+   into the protocol layer itself remains a separate, larger unit of
+   work, deliberately out of scope here, and should start with its own
+   design/scoping pass given how much of the wire protocol currently
+   assumes no handshake exists at all.
 
 Whatever is added, keep the binding rule: no cryptographic primitive is
 ever hand-rolled from scratch — real cryptography is Go standard library
@@ -200,8 +262,7 @@ proven weak by a real test, never merely asserted.
   under a second on ordinary development hardware, but neither document
   claims a precise wall-clock figure, since that is genuinely
   machine-dependent.
-- §1.2's X25519 key-agreement gap and §1.3's hybrid-mode gap (both
-  named in the original design but never implemented) remain open,
-  carried-forward items — see those sections above for the full
-  explanation, and `docs/ATTACK_COVERAGE.md` for how this constrains
-  attack-scenario coverage.
+- §1.3's hybrid-mode gap (named in the original design but never
+  implemented) remains an open, carried-forward item — see that section
+  above for the full explanation. §1.2's X25519 key-agreement gap is
+  closed as of this unit of work.

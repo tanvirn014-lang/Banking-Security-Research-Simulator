@@ -162,7 +162,7 @@ This runs the `ledger-tamper` attack under both `configs/hardened.json`
 (subtest `hardened`, expected to be detected) and `configs/vulnerable.json`
 (subtest `vulnerable`, expected to go undetected) — the standard pattern
 every differential attack test in this project follows. See
-`docs/ATTACK_SURFACES.md` §9 for the full list of 11 registered attack
+`docs/ATTACK_SURFACES.md` §9 for the full list of 12 registered attack
 IDs and their test names, and `docs/ATTACK_COVERAGE.md` for exactly what
 each one does and why.
 
@@ -191,7 +191,7 @@ To actually *run* every registered scenario in one comparative pass
 use `internal/benchmark.RunSuite` — see
 [Running benchmarks](#running-benchmarks) and
 `docs/BENCHMARK_EXAMPLES.md` §3 for a complete, runnable program that
-does exactly this against all 11 registered scenarios.
+does exactly this against all 12 registered scenarios.
 
 ## Running benchmarks
 
@@ -234,7 +234,7 @@ Two committed profiles, `configs/vulnerable.json` and
 | `crypto_profile` / `min_accepted_crypto_profile` | `standard` / `standard` | `standard` / `standard` |
 
 Every registered attack scenario (except `key-revocation`, which must
-hold in *every* mode by design, and the two cryptographic scenarios,
+hold in *every* mode by design, and the three cryptographic scenarios,
 which fork on a separate `weak-educational`/`standard` axis instead — see
 `docs/ATTACK_SURFACES.md` §9) succeeds under `vulnerable.json` and is
 blocked or detected under `hardened.json`. A `SecurityProfile` is loaded
@@ -272,14 +272,13 @@ guess from the mean alone.
 The full, verified-against-the-actual-registry tables — every registered
 scenario ID, its target component, its vulnerable/hardened outcome, and
 which impact field (if any) each one populates — are in
-`docs/ATTACK_SURFACES.md` §9 and §10. In brief: **11 scenarios are
+`docs/ATTACK_SURFACES.md` §9 and §10. In brief: **12 scenarios are
 implemented and verified** across application, protocol, ledger,
-key-management, and cryptographic categories; **2 are explicitly
-unsupported** with documented technical reasons (small-parameter
-Diffie-Hellman discrete-log — no key-exchange primitive exists in this
-codebase at all; static-IV reuse detection — ECB mode has no IV concept
-to reuse). See `docs/ATTACK_COVERAGE.md` for the full implementation
-rationale behind each one.
+key-management, and cryptographic categories; **1 is explicitly
+unsupported** with a documented technical reason (static-IV reuse
+detection — ECB mode has no IV concept to reuse). See
+`docs/ATTACK_COVERAGE.md` for the full implementation rationale behind
+each one.
 
 ## Adding a new attack
 
@@ -381,12 +380,6 @@ Disclosed honestly, independently re-confirmed against the actual code
 during Milestone 13's documentation pass (not copied from an earlier
 document without checking):
 
-- **No Diffie-Hellman / key-exchange primitive anywhere in
-  `internal/crypto`** — `Engine` has no key-exchange method, and the
-  "standard" profile's own originally-planned X25519 key agreement was
-  never implemented. First flagged in Milestone 4's security review,
-  repeated in every review since; still an open design question. See
-  `docs/CRYPTOGRAPHY.md` §1.2.
 - **Static-IV reuse detection is unsupported** — not a missed
   implementation step but a genuine inconsistency in the original design
   (ECB mode, which is what the weak-educational profile actually uses,

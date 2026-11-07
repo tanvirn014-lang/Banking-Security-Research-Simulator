@@ -1,11 +1,8 @@
 # BankSec Lab — Implementation Plan (Milestone Roadmap)
 
-**Status:** Draft, awaiting approval. Supersedes the narrower, 5-plan
-incremental roadmap sketched in
-`docs/superpowers/plans/2026-11-07-foundation-core-banking.md` ("Plan 1 of
-5"). That file's **Tasks 1-2 are already implemented and committed**
-(worktree branch `worktree-foundation-core-banking`, commits
-`269812c..8d06364`) and are retained below as Milestone 1, Tasks F1-F2 —
+**Status:** Draft, awaiting approval. Supersedes an earlier, narrower
+incremental roadmap. That roadmap's first two tasks were already
+implemented and are retained below as Milestone 1, Tasks F1-F2 —
 nothing is redone or discarded.
 
 **Companion documents:** [TASK_BREAKDOWN.md](TASK_BREAKDOWN.md) (the actual

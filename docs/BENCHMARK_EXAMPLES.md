@@ -61,7 +61,7 @@ and the full-suite runner (`TestRunSuite_CoversEveryRegisteredScenario`).
 
 ## 3. A full attack-suite run against every registered Milestone 8 scenario
 
-This is not a committed test (running all 11 registered scenarios
+This is not a committed test (running all 12 registered scenarios
 comparatively, 30 reps each under `BENCHMARK_METHODOLOGY.md §2`'s
 documented default, would make the package's own fast unit-test suite
 slow) — it is a worked example showing how `RunSuite` is meant to be

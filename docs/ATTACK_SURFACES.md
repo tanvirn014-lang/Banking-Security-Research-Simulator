@@ -95,7 +95,7 @@ by `internal/crypto` for new operations — **F**.
 |---|---|
 | Target | `internal/crypto` |
 | Prerequisites | weak-educational profile active |
-| Execution | classical cryptanalysis against toy constructs: brute-force factoring of a small RSA modulus, discrete-log via brute force on a small-parameter DH group, ECB-mode pattern detection, static-IV reuse detection |
+| Execution | classical cryptanalysis against toy constructs: brute-force factoring of a small RSA modulus, discrete-log via baby-step-giant-step on a small-parameter DH group, ECB-mode pattern detection, static-IV reuse detection |
 | Expected impact | key/plaintext recovered under weak-educational profile within a bounded time budget; infeasible under standard/PQC profile within the same budget |
 | Detection | N/A for the cryptanalysis itself (it's a passive mathematical attack, not an observable system event) — detection applies only if the harness also attempts to *use* a recovered key against the protocol/backend, which then follows the protocol/key-management detection paths above |
 | Metrics | `execution_time_ms`, `attempts`, `computational_cost` |
@@ -174,6 +174,7 @@ in the test file itself, not a `configs/*.json` file):
 |---|---|---|---|---|---|
 | 10 | `crypto-toy-rsa-factor-forge` | cryptographic | `internal/crypto` | signature forged | infeasible (no RSA modulus to factor — Ed25519/ML-DSA instead) |
 | 11 | `crypto-ecb-pattern-leakage` | cryptographic | `internal/crypto` | pattern leaked (ECB) | not leaked (AES-GCM) |
+| 12 | `crypto-dh-discrete-log` | cryptographic | `internal/crypto` | attacker recovers the shared secret via discrete-log recovery | infeasible (no DH group to attack — X25519 instead) |
 
 **Note on row 9:** key revocation is **not** a vulnerable/hardened
 differential by design — `ATTACK_SURFACES.md` §4 itself frames it as the
@@ -182,14 +183,12 @@ succeed in one mode. Both `configs/vulnerable.json` and
 `configs/hardened.json` must reject a revoked key for new operations.
 
 **Not implemented (Unsupported, with technical reasons — §5 above and
-`ATTACK_COVERAGE.md` §5 have the full explanation):** small-parameter
-Diffie-Hellman discrete-log (no key-exchange primitive exists anywhere
-in `internal/crypto`), static-IV reuse detection (ECB mode has no IV
-concept to reuse — an inconsistency in the original design table, not a
-missed step).
+`ATTACK_COVERAGE.md` §5 have the full explanation):** static-IV reuse
+detection (ECB mode has no IV concept to reuse — an inconsistency in the
+original design table, not a missed step).
 
 **AI-agent and benchmark are not separate attack surfaces** — they are
-*clients* of the 11 scenarios above (`internal/agent.Agent` selects and
+*clients* of the 12 scenarios above (`internal/agent.Agent` selects and
 executes registered scenarios through the same `harness.Runner`/
 `Registry` every other caller uses; `internal/benchmark.RunComparative`/
 `RunSuite` do the same, repeatedly, for aggregate statistics). Neither
@@ -216,8 +215,21 @@ by reading each scenario's own `Verify` function directly (not assumed):
 | `protocol-downgrade` | `RecordsCompromised` | the balance read over the downgraded connection |
 | `key-exposure` | `DataLeakedBytes` | the length, in bytes, of the actual key material recovered |
 | `crypto-toy-rsa-factor-forge` | `ComputationalCost` | trial-division attempts used to factor the modulus |
+| `crypto-dh-discrete-log` | `ComputationalCost` | baby-step-giant-step operation count used to recover the private exponent |
 | `ledger-tamper`, `audit-tamper` | `DetectionLatencyMS` only (no data-leak field) | time from tamper to detection — these two attacks break an *integrity* invariant, not a *confidentiality* one, so they report detection speed rather than a leaked quantity |
 | `key-revocation`, `crypto-ecb-pattern-leakage` | none | both report only `Success`/`Attempts` — revocation is a pass/fail control check, and ECB pattern leakage's "impact" (identical ciphertext blocks) is structural, not naturally expressed as a byte/record count |
+
+**`crypto-dh-discrete-log`'s `ComputationalCost` is not reproducible
+from `seed` alone**, unlike `crypto-toy-rsa-factor-forge`'s (whose fixed
+modulus makes its trial count deterministic). Both parties' DH keypairs
+are generated via `crypto.Engine.GenerateKeyPair`, which always sources
+its private exponent from `crypto/rand` — the scenario's own `rnd
+*rand.Rand` seed parameter is unused for key generation (see
+`CRYPTOGRAPHY.md` §2). The attacker's recovered public key varies run to
+run, so baby-step-giant-step's operation count varies too, even at a
+fixed seed. `Success` itself is unaffected and remains deterministic
+(the attack always succeeds within budget); only the exact
+`ComputationalCost` value differs between runs.
 
 **Fields defined in the schema but never populated by any registered
 scenario, as of this writing:** `TimeToCompromiseMS` and

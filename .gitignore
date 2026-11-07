@@ -1,4 +1,3 @@
-.superpowers/
 # go build ./... drops a binary named after the single main package at the repo root
 /banksec
 /banksec.exe

@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"crypto/aes"
+	"crypto/rand"
 	"crypto/sha256"
 	"math/big"
 
@@ -129,6 +130,105 @@ func toyRSAVerify(msg, sig []byte) bool {
 	sigInt := new(big.Int).SetBytes(sig)
 	computed := new(big.Int).Exp(sigInt, toyRSAE, toyRSAN)
 	return computed.Cmp(toyRSADigest(msg)) == 0
+}
+
+// --- Key exchange: safe-prime subgroup Diffie-Hellman -----------------
+//
+// A fixed, small, documented safe-prime group: toyDHP = 2*toyDHQ + 1
+// (both prime), toyDHG a generator of the order-toyDHQ subgroup of
+// (Z/toyDHP Z)*. The safe-prime/subgroup construction (as opposed to an
+// arbitrary prime modulus) matters here: without it, a peer public key
+// from a small subgroup (the trivial case being 1) would make the
+// derived secret predictable regardless of either party's private
+// exponent -- see weakDHDeriveSharedSecret's validation below, which
+// checks both range and subgroup membership for exactly this reason.
+// toyDHP is deliberately kept below internal/quantum's
+// MaxDiscreteLogModulus (its baby-step-giant-step table is sized from p
+// itself, not from toyDHQ), so the crypto-dh-discrete-log attack
+// scenario can recover a private exponent within that existing budget.
+var (
+	toyDHQ = big.NewInt(490481)
+	toyDHP = new(big.Int).Add(new(big.Int).Mul(toyDHQ, big.NewInt(2)), big.NewInt(1))
+	toyDHG = big.NewInt(3)
+)
+
+// ToyDHPublicParams returns the weak-educational profile's single,
+// fixed, globally-known toy DH group parameters (modulus and
+// generator) as defensive copies -- mirroring ToyRSAPublicKey's own
+// pattern exactly, so a caller mutating the returned values can never
+// corrupt this package's internal state.
+func ToyDHPublicParams() (p, g *big.Int) {
+	return new(big.Int).Set(toyDHP), new(big.Int).Set(toyDHG)
+}
+
+// toyDHByteLen is the fixed width every weak-educational DH private
+// key, public key, and shared secret is encoded into via FillBytes --
+// never big.Int.Bytes(), whose variable-length output would make two
+// callers' encodings of numerically-small values fail to compare/
+// round-trip consistently as raw []byte.
+var toyDHByteLen = len(toyDHP.Bytes())
+
+// ErrWeakDHInvalidPeerPublicKey is returned when a peer public key
+// fails range or subgroup-membership validation (see
+// weakDHDeriveSharedSecret). Without this check, a peer value outside
+// the order-toyDHQ subgroup (the trivial case being 1) would make the
+// derived secret predictable regardless of either party's private
+// exponent.
+var ErrWeakDHInvalidPeerPublicKey = apperr.New(apperr.CodeValidation, "weak-educational DH: peer public key failed range or subgroup validation")
+
+// weakDHGenerateKeyPair picks a private exponent x uniformly in
+// [2, toyDHQ-1] and returns (x, g^x mod p), both FillBytes-encoded to
+// toyDHByteLen.
+func weakDHGenerateKeyPair() (private, public []byte, err error) {
+	// rand.Int(reader, max) returns a uniform value in [0, max). To land
+	// in [2, toyDHQ-1] (size toyDHQ-2), draw from [0, toyDHQ-2) and
+	// shift by 2.
+	span := new(big.Int).Sub(toyDHQ, big.NewInt(2))
+	r, err := rand.Int(rand.Reader, span)
+	if err != nil {
+		return nil, nil, apperr.Wrap(apperr.CodeInternal, "generate weak-educational DH private exponent", err)
+	}
+	x := new(big.Int).Add(r, big.NewInt(2))
+	y := new(big.Int).Exp(toyDHG, x, toyDHP)
+
+	private = make([]byte, toyDHByteLen)
+	public = make([]byte, toyDHByteLen)
+	x.FillBytes(private)
+	y.FillBytes(public)
+	return private, public, nil
+}
+
+// weakDHDeriveSharedSecret validates peerPublicKey (the one value that
+// can come from an untrusted peer) for both range and subgroup
+// membership before using it, and validates privateKey only for
+// correct byte width (it is this side's own previously-generated
+// secret, not an attacker-controlled input).
+func weakDHDeriveSharedSecret(privateKey, peerPublicKey []byte) ([]byte, error) {
+	if len(privateKey) != toyDHByteLen {
+		return nil, apperr.New(apperr.CodeValidation, "weak-educational DH: private key has the wrong byte width")
+	}
+	privateExponent := new(big.Int).SetBytes(privateKey)
+	qMinus1 := new(big.Int).Sub(toyDHQ, big.NewInt(1))
+	if privateExponent.Cmp(big.NewInt(2)) < 0 || privateExponent.Cmp(qMinus1) > 0 {
+		return nil, apperr.New(apperr.CodeValidation, "weak-educational DH: private key is out of the [2, toyDHQ-1] range GenerateKeyPair produces")
+	}
+	if len(peerPublicKey) != toyDHByteLen {
+		return nil, ErrWeakDHInvalidPeerPublicKey
+	}
+
+	y := new(big.Int).SetBytes(peerPublicKey)
+	pMinus1 := new(big.Int).Sub(toyDHP, big.NewInt(1))
+	if y.Cmp(big.NewInt(1)) <= 0 || y.Cmp(pMinus1) >= 0 {
+		return nil, ErrWeakDHInvalidPeerPublicKey
+	}
+	if new(big.Int).Exp(y, toyDHQ, toyDHP).Cmp(big.NewInt(1)) != 0 {
+		return nil, ErrWeakDHInvalidPeerPublicKey
+	}
+
+	secret := new(big.Int).Exp(y, privateExponent, toyDHP)
+	out := make([]byte, toyDHByteLen)
+	secret.FillBytes(out)
+	return out, nil
 }
 
 // --- MAC: HMAC-SHA-256 with a truncated, tiled key --------------------

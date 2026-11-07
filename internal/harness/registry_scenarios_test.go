@@ -18,8 +18,8 @@ func TestRegisterAllScenarios_NoCollisionsAllCategoriesPresent(t *testing.T) {
 	}
 
 	all := reg.All()
-	if len(all) != 11 {
-		t.Fatalf("expected 11 registered scenarios, got %d: %+v", len(all), all)
+	if len(all) != 12 {
+		t.Fatalf("expected 12 registered scenarios, got %d: %+v", len(all), all)
 	}
 
 	wantCounts := map[string]int{
@@ -27,7 +27,7 @@ func TestRegisterAllScenarios_NoCollisionsAllCategoriesPresent(t *testing.T) {
 		"protocol":       3,
 		"ledger":         2,
 		"key-management": 2,
-		"cryptographic":  2,
+		"cryptographic":  3,
 	}
 	for category, want := range wantCounts {
 		got := len(reg.ByCategory(category))
@@ -42,6 +42,7 @@ func TestRegisterAllScenarios_NoCollisionsAllCategoriesPresent(t *testing.T) {
 		LedgerTamperScenarioID, AuditTamperScenarioID,
 		KeyExposureScenarioID, KeyRevocationScenarioID,
 		ToyRSAFactorAndForgeScenarioID, ECBPatternLeakageScenarioID,
+		DiffieHellmanDiscreteLogScenarioID,
 	} {
 		if _, ok := reg.ByID(id); !ok {
 			t.Fatalf("expected ByID(%q) to find a registered scenario", id)

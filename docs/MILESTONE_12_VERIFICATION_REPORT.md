@@ -6,9 +6,9 @@ of any prior implementation report, commit message, or ledger entry —
 every command below was executed fresh in this session, against the
 actual checked-out code, and its real output is what is recorded here.
 
-**Verified against:** commit `360e29c9e101ee2c887706b72a8cb327f6e2dff6`,
-branch `worktree-foundation-core-banking`, clean working tree
-(`git status --short` empty before and after verification).
+**Verified against:** the implementation as it stood at the end of
+Milestone 12, with a clean working tree (`git status --short` empty
+before and after verification).
 
 **Environment:** `go version go1.27.3 windows/amd64`. Race-detector runs
 used `CC` pointed at a 64-bit mingw-w64 GCC (required for cgo on
