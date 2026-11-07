@@ -85,7 +85,7 @@ func Shor(ctx context.Context, n int) ([]int, CircuitTrace, error) {
 		}
 
 		rng := rand.New(rand.NewSource(int64(n)*1009 + int64(a)))
-		r, queries, gateOps, err := quantumFindOrderCandidate(a, n, workBits, countBits, rng)
+		r, queries, gateOps, err := quantumFindOrderCandidate(ctx, a, n, workBits, countBits, rng)
 		if err != nil {
 			return nil, CircuitTrace{}, err
 		}
@@ -98,9 +98,22 @@ func Shor(ctx context.Context, n int) ([]int, CircuitTrace, error) {
 		half := modPow(a, r/2, n)
 		factors := collectNontrivialFactorPair(gcdInt(half-1, n), gcdInt(half+1, n), n)
 		if factors != nil {
+			// Security review finding I4: Shor previously only checked
+			// ctx BETWEEN whole attempts, so a deadline expiring mid
+			// -attempt (each one is dozens of controlled-unitary
+			// applications over a 2^19-amplitude state for n=35) was
+			// ignored, and a "successful" result could be returned well
+			// after the caller's own deadline. One last check here,
+			// right before reporting success, closes that gap for the
+			// attempt that actually found the factors (the loop inside
+			// quantumFindOrderCandidate itself is also now checked --
+			// see its own doc comment).
+			if err := ctx.Err(); err != nil {
+				return nil, CircuitTrace{}, err
+			}
 			return factors, CircuitTrace{
 				QubitsUsed:            totalQubits,
-				CircuitDepth:          depth,
+				GateOperations:        depth,
 				OracleQueries:         oracleQueries,
 				SimulatedCPUTimeMS:    time.Since(start).Milliseconds(),
 				TheoreticalComplexity: "O((log N)^3) elementary gate operations on real quantum hardware (Shor's algorithm's textbook asymptotic gate complexity) -- a theoretical statement, NOT measured by this classical simulation, whose own cost instead scales as O(2^qubits) in both time and memory",
@@ -111,7 +124,7 @@ func Shor(ctx context.Context, n int) ([]int, CircuitTrace, error) {
 
 	return nil, CircuitTrace{
 		QubitsUsed:         totalQubits,
-		CircuitDepth:       depth,
+		GateOperations:     depth,
 		OracleQueries:      oracleQueries,
 		SimulatedCPUTimeMS: time.Since(start).Milliseconds(),
 		Label:              SimulationLabel,
@@ -125,7 +138,13 @@ func Shor(ctx context.Context, n int) ([]int, CircuitTrace, error) {
 // didn't yield any convergent denominator satisfying a^r ≡ 1 (mod n) --
 // the caller then moves on to the next candidate base, exactly as the
 // real algorithm retries with a different random base on failure.
-func quantumFindOrderCandidate(a, n, workBits, countBits int, rng *rand.Rand) (r, oracleQueries, gateOps int, err error) {
+//
+// Checks ctx between each controlled-unitary application (security
+// review finding I4): for n=35 this loop applies 13 permutation
+// unitaries, each touching the full 2^19-amplitude state -- the
+// expensive part of one attempt -- so a deadline expiring partway
+// through was previously invisible until the whole attempt finished.
+func quantumFindOrderCandidate(ctx context.Context, a, n, workBits, countBits int, rng *rand.Rand) (r, oracleQueries, gateOps int, err error) {
 	totalQubits := workBits + countBits
 	c, cerr := NewCircuitWithRand(totalQubits, rng)
 	if cerr != nil {
@@ -146,6 +165,9 @@ func quantumFindOrderCandidate(a, n, workBits, countBits int, rng *rand.Rand) (r
 	}
 
 	for j := 0; j < countBits; j++ {
+		if err := ctx.Err(); err != nil {
+			return 0, oracleQueries, gateOps, err
+		}
 		multiplier := modPow(a, 1<<uint(j), n)
 		perm := controlledMulModPermutation(j, workBits, countBits, multiplier, n)
 		c.ApplyPermutationUnitary(perm)

@@ -68,9 +68,13 @@ genuine unitary (norm-preserving, reversible) linear algebra. Every gate
 standard quantum gate's matrix action, implemented directly against the
 full amplitude vector, never a precomputed shortcut.
 
-Two gates are a different kind of unitary, used only where a textbook
-toy simulator of this scale needs one, and documented individually in
-`circuit.go`:
+Three operations are a different kind of unitary, used only where a
+textbook toy simulator of this scale needs one, and documented
+individually in `circuit.go` (a security review, finding M6, caught
+this document previously saying "two gates" and omitting the third
+entirely, and separately saying Grover's marking oracle used
+`ApplyPermutationUnitary` when it actually uses `ApplyPhaseOracle` —
+both corrected here):
 
 - **`ApplyPermutationUnitary`** (used by `Shor` for its controlled
   modular-exponentiation oracle) lifts an arbitrary classically-computed
@@ -83,29 +87,41 @@ toy simulator of this scale needs one, and documented individually in
 - **`ApplyPhaseOracle`** (used by `Grover` for its marking oracle)
   similarly wraps an arbitrary caller-supplied classical predicate as a
   diagonal sign-flip unitary.
+- **`ApplyDiffusion`** (used by `Grover` for its diffusion/reflection
+  step) is a *fixed*, well-known operator (not an arbitrary oracle), but
+  is likewise implemented directly via its mean-amplitude identity rather
+  than built up from `ApplyH`/`ApplyX`/`ApplyControlledPhase`.
 
-Both are still **genuine unitary operations over genuinely superposed
-amplitudes** — the superposition, interference, and entanglement the
-rest of the circuit produces are real (simulated) quantum effects; only
-these two gates' own internal implementation skips a further
-gate-by-gate decomposition that would not change the physics being
-demonstrated, only its cost to build. `ApplyH`, `ApplyX`, `ApplyCNOT`,
-`ApplyControlledPhase`, and the `ApplyQFT`/`ApplyInverseQFT` built from
-them, by contrast, **are** elementary-gate-decomposed, verified directly
-against a brute-force reference DFT matrix (`TestApplyQFT_MatchesTextbookDFTMatrix`)
-rather than only self-consistency.
+All three are still **genuine unitary operations over genuinely
+superposed amplitudes** — the superposition, interference, and
+entanglement the rest of the circuit produces are real (simulated)
+quantum effects; only these three operations' own internal
+implementation skips a further gate-by-gate decomposition that would not
+change the physics being demonstrated, only its cost to build. `ApplyH`,
+`ApplyX`, `ApplyCNOT`, `ApplyControlledPhase`, and the
+`ApplyQFT`/`ApplyInverseQFT` built from them, by contrast, **are**
+elementary-gate-decomposed, verified directly against a brute-force
+reference DFT matrix (`TestApplyQFT_MatchesTextbookDFTMatrix` and
+`TestApplyQFT_MatchesTextbookDFTMatrix_AcrossQubitCounts`, covering
+n=1..8 plus a non-contiguous sub-register) rather than only
+self-consistency.
 
 `CircuitTrace` keeps four numbers separate:
 
-- **`QubitsUsed` / `CircuitDepth` / `OracleQueries`** — structural counts
-  of the simulated circuit itself (how many qubits; how many gate
-  layers; how many oracle/controlled-unitary invocations). These are the
-  same counts a real quantum computer executing this *exact circuit*
-  would report — they do not depend on how expensive it was to
-  classically simulate. For `Shor`, `OracleQueries` counts controlled
-  modular-exponentiation invocations (one per counting qubit); for
-  `Grover`, it counts amplitude-amplification iterations (one
-  oracle-plus-diffusion pair each).
+- **`QubitsUsed` / `GateOperations` / `OracleQueries`** — structural
+  counts of the simulated circuit itself (how many qubits; how many gate
+  applications; how many oracle/controlled-unitary invocations).
+  `GateOperations` is named for exactly what it counts — a running total
+  of `Apply*` calls — not "circuit depth" (a security review correction,
+  finding M1: true circuit depth is the length of the longest
+  dependency chain of gates that cannot run in parallel, which this
+  package has never computed). For `Shor`, both `GateOperations` and
+  `OracleQueries` sum across **every** candidate-base attempt within one
+  `Shor` call, including attempts that didn't yield a usable period, not
+  just the successful one. `OracleQueries` specifically counts controlled
+  modular-exponentiation invocations (one per counting qubit) for `Shor`,
+  and amplitude-amplification iterations (one oracle-plus-diffusion pair
+  each) for `Grover`.
 - **`SimulatedCPUTimeMS`** — real, measured wall-clock time this
   classical simulation took on this machine. This is **not** a
   measurement of quantum hardware performance, and must never be
@@ -142,6 +158,41 @@ each documented at its call site and repeated here for visibility:
   part of the `O(sqrt(N/M))` theoretical query complexity being
   demonstrated. Counting it as an "oracle query" would conflate the
   demo's own setup cost with the thing being measured.
+
+### 2.4 Grover is genuinely probabilistic, and honestly reports failure
+
+Real Grover's algorithm never succeeds with probability exactly 1 —
+amplitude amplification rotates the state toward (not onto) the marked
+subspace, and the optimal iteration count is itself only an integer
+approximation of the ideal (generally irrational) rotation angle. A
+security review (finding I1) caught an early version of this code
+*silently returning an unmarked element with `err == nil`* whenever more
+than half the search space was marked (`M > N/2`), because the iteration
+formula `floor(pi/4 * sqrt(N/M))`, forced up to a minimum of 1, can
+overshoot the optimal angle badly enough to drive the true success
+probability to **exactly 0** — reproduced concretely with `N=4, M=3`.
+
+Two changes followed from treating this as "the simulation must report
+what really happened," not as a bug to paper over with a bigger forced
+iteration count:
+
+1. Whenever `M > N/2`, `Grover` now runs **zero** amplification
+   iterations: the uniform superposition's own success probability
+   (`M/N`) already exceeds 50% in that regime, and any amplification
+   only makes it worse (the "more than half marked" case is a well-known
+   edge case in the Grover literature, not something this simulator
+   invented a special rule for).
+2. **Every** `Grover` call verifies its own measured result against the
+   real `oracle` before reporting success. If the measurement lands on
+   an unmarked element — which can genuinely happen, with calculable
+   probability, for ANY `M` — `Grover` returns `ErrGroverMeasurementUnmarked`
+   rather than a false success.
+
+This means a caller of `Grover` must handle a non-nil error as a normal,
+expected outcome of a probabilistic algorithm, not an exceptional
+condition. A real quantum computer running this exact circuit would face
+the identical chance of an unmarked measurement — this is Grover's own
+genuine behavior, faithfully simulated, not a simulation artifact.
 
 ## 3. Determinism and reproducibility
 

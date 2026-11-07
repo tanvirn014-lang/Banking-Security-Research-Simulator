@@ -243,14 +243,114 @@ func TestApplyDiffusion_IsItsOwnInverse(t *testing.T) {
 	}
 }
 
+// TestQubitBounds_PanicConsistently is the regression test for security
+// review finding M2: before this, an out-of-range qubit index produced
+// a DIFFERENT failure mode per method (some silently did nothing or
+// returned 0, some panicked with Go's own "index out of range" or
+// "negative shift amount"). Every Apply*/Measure method must now panic
+// via the same validateQubit helper for any out-of-range index.
+func TestQubitBounds_PanicConsistently(t *testing.T) {
+	mustPanic := func(name string, f func()) {
+		t.Helper()
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("%s: expected a panic for an out-of-range qubit, got none", name)
+			}
+		}()
+		f()
+	}
+
+	mustPanic("ApplyH(5) on 3 qubits", func() { c, _ := NewCircuit(3); c.ApplyH(5) })
+	mustPanic("ApplyH(-1)", func() { c, _ := NewCircuit(3); c.ApplyH(-1) })
+	mustPanic("ApplyX(3) on 3 qubits", func() { c, _ := NewCircuit(3); c.ApplyX(3) })
+	mustPanic("ApplyCNOT(5,0) on 3 qubits", func() { c, _ := NewCircuit(3); c.ApplyCNOT(5, 0) })
+	mustPanic("ApplyCNOT(0,5) on 3 qubits", func() { c, _ := NewCircuit(3); c.ApplyCNOT(0, 5) })
+	mustPanic("ApplyCNOT(1,1) same qubit", func() { c, _ := NewCircuit(3); c.ApplyCNOT(1, 1) })
+	mustPanic("ApplyControlledPhase(7,0,..) on 2 qubits", func() { c, _ := NewCircuit(2); c.ApplyControlledPhase(7, 0, 1) })
+	mustPanic("Measure(5) on 3 qubits", func() { c, _ := NewCircuit(3); c.Measure(5) })
+}
+
+// TestMeasureAll_FallbackNeverReturnsZeroAmplitudeOutcome is the
+// regression test for security review finding M4: MeasureAll's
+// float-rounding fallback previously used the literal last index
+// (len(State)-1) unconditionally, which can have exactly zero amplitude
+// -- an outcome the state never actually had any chance of producing.
+// Reproduces the reviewer's own probe: a state whose true probabilities
+// sum to slightly less than 1 (float rounding), paired with an rng that
+// always returns the maximum possible float64 just under 1, forces the
+// fallback path; the last basis state here has zero amplitude, so the
+// fallback must choose an earlier, genuinely nonzero-amplitude state
+// instead.
+func TestMeasureAll_FallbackNeverReturnsZeroAmplitudeOutcome(t *testing.T) {
+	c, err := NewCircuitWithRand(2, rand.New(maxFloatSource{}))
+	if err != nil {
+		t.Fatalf("NewCircuitWithRand: %v", err)
+	}
+	// index 3 has amplitude exactly 0; indices 0,1 are slightly
+	// under-normalized (as float rounding naturally produces).
+	c.State = []complex128{
+		complex(math.Sqrt(0.5), 0),
+		complex(math.Sqrt(0.5-1e-15), 0),
+		0,
+		0,
+	}
+	outcome := c.MeasureAll()
+	if outcome == 3 {
+		t.Fatalf("expected the fallback to skip the zero-amplitude index 3, got outcome=%d", outcome)
+	}
+	if outcome != 0 && outcome != 1 {
+		t.Fatalf("expected the fallback to land on a genuinely nonzero-amplitude index (0 or 1), got %d", outcome)
+	}
+}
+
+// maxFloatSource is a rand.Source producing rand.Float64() == 1-2^-52,
+// the largest float64 strictly less than 1 -- forcing MeasureAll's
+// cumulative-probability loop to fall through without ever satisfying
+// `r < cumulative` for a state whose true probabilities don't sum to
+// exactly 1 in float64. NOT 1<<63-1: math/rand's Float64() retries
+// forever if int64-to-float64 conversion rounds its result up to
+// exactly 1 (which 1<<63-1 does, since 2^63-1 is too large for float64's
+// 53-bit mantissa and rounds to 2^63) -- 1<<63-1<<11 is the nearest
+// representable value below that rounds to something strictly less than
+// 1 instead.
+type maxFloatSource struct{}
+
+func (maxFloatSource) Int63() int64 { return 1<<63 - 1<<11 }
+func (maxFloatSource) Seed(int64)   {}
+
+// TestNoImportsOutsideStdlib checks every file this package could ever
+// build, not just this platform's non-test files. Security review
+// finding M5: the original version of this test checked only
+// pkg.Imports (non-test, current-GOOS files) -- a banned import from a
+// _test.go file (internal or external) passed undetected, and so did
+// one hidden behind a `//go:build linux` (or any other non-matching)
+// tag when running on a different GOOS. UseAllFiles makes
+// build.ImportDir include every build-tag variant regardless of the
+// host GOOS/GOARCH, and TestImports/XTestImports cover _test.go files
+// (both same-package and external _test packages).
 func TestNoImportsOutsideStdlib(t *testing.T) {
-	pkg, err := build.ImportDir(".", 0)
+	pkg, err := build.ImportDir(".", build.ImportMode(0))
 	if err != nil {
 		t.Fatalf("import package: %v", err)
 	}
-	for _, path := range pkg.Imports {
+	ctx := build.Default
+	ctx.UseAllFiles = true
+	pkgAllFiles, err := ctx.ImportDir(".", 0)
+	if err != nil {
+		t.Fatalf("import package (all build-tag variants): %v", err)
+	}
+
+	var allImports []string
+	allImports = append(allImports, pkg.Imports...)
+	allImports = append(allImports, pkg.TestImports...)
+	allImports = append(allImports, pkg.XTestImports...)
+	allImports = append(allImports, pkgAllFiles.Imports...)
+	allImports = append(allImports, pkgAllFiles.TestImports...)
+	allImports = append(allImports, pkgAllFiles.XTestImports...)
+
+	for _, path := range allImports {
 		if strings.HasPrefix(path, "banksec-lab/") {
-			t.Fatalf("package quantum must not import any other banksec-lab package (CRYPTOGRAPHY.md §5: structurally disconnected from internal/crypto), found: %s", path)
+			t.Fatalf("package quantum (including its tests, and every build-tag variant) must not import any other banksec-lab package (CRYPTOGRAPHY.md §5: structurally disconnected from internal/crypto), found: %s", path)
 		}
 	}
 }

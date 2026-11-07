@@ -3,7 +3,6 @@ package quantum
 import (
 	"context"
 	"errors"
-	"math"
 	"strings"
 	"testing"
 )
@@ -78,24 +77,49 @@ func TestGrover_OutputCarriesSimulationLabel(t *testing.T) {
 	}
 }
 
+// TestComplexityReport_QuadraticSpeedupRatio asserts against
+// INDEPENDENTLY, hand-computed literal expected values -- not by
+// re-deriving the implementation's own formula in the test (security
+// review finding M8: the original version of this test rebuilt
+// wantQuantum via the exact same math.Ceil(math.Pi/4*math.Sqrt(...))
+// expression the implementation itself uses, so it could only ever
+// confirm "the code agrees with itself," never catch a real formula
+// bug). For bits=16, N=65536=256^2, so sqrt(N)=256 exactly:
+// pi/4*256 = 201.061929... -> ceil = 202 (verified by hand/calculator,
+// not computed by this test).
 func TestComplexityReport_QuadraticSpeedupRatio(t *testing.T) {
-	const bits = 16 // N = 65536
-	classical, quantum := ComplexityReport(bits)
-	n := 1 << bits
-	if classical != n {
-		t.Fatalf("expected classicalExpectedOps == N == %d, got %d", n, classical)
+	const bits = 16 // N = 65536 = 256^2
+	const wantClassical = 65536
+	const wantQuantum = 202 // ceil(pi/4 * 256), computed independently of this package's own code
+
+	classical, quantum, err := ComplexityReport(bits)
+	if err != nil {
+		t.Fatalf("ComplexityReport: %v", err)
 	}
-	wantQuantum := int(math.Ceil(math.Pi / 4 * math.Sqrt(float64(n))))
+	if classical != wantClassical {
+		t.Fatalf("expected classicalExpectedOps=%d, got %d", wantClassical, classical)
+	}
 	if quantum != wantQuantum {
-		t.Fatalf("expected quantumExpectedOps == ceil(pi/4*sqrt(N)) == %d, got %d", wantQuantum, quantum)
+		t.Fatalf("expected quantumExpectedOps=%d, got %d", wantQuantum, quantum)
 	}
 	// The whole point being demonstrated: quadratic, not exponential,
-	// speedup -- the ratio should track (4/pi)*sqrt(N) (Grover's own
-	// pi/4 prefactor against an exact sqrt(N) iteration count), not some
-	// fabricated larger improvement.
+	// speedup. 65536/202 = 324.4..., a large but QUADRATIC-scale
+	// improvement (not, say, an exponential 65536/16), and nowhere near
+	// a fabricated larger number.
 	ratio := float64(classical) / float64(quantum)
-	wantRatio := (4 / math.Pi) * math.Sqrt(float64(n))
-	if math.Abs(ratio-wantRatio) > 2 {
-		t.Fatalf("expected the classical/quantum ratio to track (4/pi)*sqrt(N)=%.1f, got %.1f", wantRatio, ratio)
+	if ratio < 300 || ratio > 350 {
+		t.Fatalf("expected a quadratic-scale ratio around 324 (65536/202), got %.1f", ratio)
+	}
+}
+
+func TestComplexityReport_RejectsOutOfRangeInput(t *testing.T) {
+	if _, _, err := ComplexityReport(-1); !errors.Is(err, ErrQubitBoundExceeded) {
+		t.Fatalf("expected ErrQubitBoundExceeded for -1, got %v", err)
+	}
+	if _, _, err := ComplexityReport(MaxQubits + 1); !errors.Is(err, ErrQubitBoundExceeded) {
+		t.Fatalf("expected ErrQubitBoundExceeded for MaxQubits+1, got %v", err)
+	}
+	if _, _, err := ComplexityReport(63); !errors.Is(err, ErrQubitBoundExceeded) {
+		t.Fatalf("expected ErrQubitBoundExceeded for 63 (would overflow 1<<63 as a negative int), got %v", err)
 	}
 }

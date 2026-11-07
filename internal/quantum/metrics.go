@@ -13,12 +13,18 @@ const SimulationLabel = "Classical simulation of a quantum algorithm's logic, at
 // theoretical quantum complexity" / "record oracle queries separately
 // from actual CPU execution time" requirements):
 //
-//   - QubitsUsed / CircuitDepth / OracleQueries are STRUCTURAL COUNTS of
-//     the simulated circuit itself (how many qubits, how many gate
-//     layers, how many oracle/controlled-unitary invocations). These
-//     are the same counts a real quantum computer executing this exact
-//     circuit would report -- they do not depend on how expensive it
-//     was to classically simulate.
+//   - QubitsUsed / GateOperations / OracleQueries are STRUCTURAL COUNTS
+//     of the simulated circuit itself (how many qubits, how many gate
+//     applications, how many oracle/controlled-unitary invocations).
+//     GateOperations is named for exactly what it counts -- a running
+//     total of Apply* calls -- and NOT "CircuitDepth" (a security-review
+//     correction, finding M1): true circuit depth is the length of the
+//     longest dependency chain of gates that cannot run in parallel,
+//     which this package has never computed; GateOperations is a
+//     coarser, honestly-named count instead. For Shor specifically, it
+//     sums across EVERY candidate-base attempt within one Shor call,
+//     including ones that didn't yield a usable period -- not the gate
+//     count of only the successful attempt.
 //   - SimulatedCPUTimeMS is a REAL, measured wall-clock duration of
 //     actually running this classical simulation on this machine. It is
 //     NOT a measurement of quantum hardware performance and must never
@@ -34,7 +40,7 @@ const SimulationLabel = "Classical simulation of a quantum algorithm's logic, at
 //   - Label is the mandatory SimulationLabel disclosure.
 type CircuitTrace struct {
 	QubitsUsed            int
-	CircuitDepth          int
+	GateOperations        int
 	OracleQueries         int
 	SimulatedCPUTimeMS    int64
 	TheoreticalComplexity string

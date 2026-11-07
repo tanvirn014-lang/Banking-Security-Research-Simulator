@@ -14,6 +14,7 @@ package quantum
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand"
@@ -53,16 +54,24 @@ var ErrQubitBoundExceeded = errors.New("quantum: qubit bound exceeded")
 // vector -- never a shortcut that skips simulating superposition or
 // entanglement. ApplyH/ApplyX/ApplyCNOT/ApplyControlledPhase are
 // elementary one- or two-qubit gates, each a direct, standard matrix
-// action. ApplyPermutationUnitary is a different kind of unitary: it
-// lifts an arbitrary classically-computed bijection on basis indices
-// directly to a unitary permutation matrix, without further decomposing
-// it into elementary gates. This is standard practice for toy quantum
-// algorithm simulators (used here for Shor's modular-exponentiation
-// oracle and Grover's marking oracle) -- it is still a real unitary
-// operating on genuinely superposed amplitudes, just not built up from
-// 1-/2-qubit gates the way a real quantum compiler would. See
-// docs/QUANTUM_METHODOLOGY.md for exactly which operations are
-// elementary-gate-decomposed and which are oracle-level unitaries.
+// action. ApplyPermutationUnitary, ApplyPhaseOracle, and ApplyDiffusion
+// are a different kind of unitary: each lifts an arbitrary classically
+// -computed function (a bijection on basis indices, an arbitrary marking
+// predicate, or the fixed reflection-about-mean operator, respectively)
+// directly to a unitary matrix, without further decomposing it into
+// elementary gates. This is standard practice for toy quantum algorithm
+// simulators -- used here for Shor's modular-exponentiation oracle
+// (ApplyPermutationUnitary) and Grover's own marking oracle
+// (ApplyPhaseOracle) and diffusion step (ApplyDiffusion) -- it is still
+// a real unitary operating on genuinely superposed amplitudes, just not
+// built up from 1-/2-qubit gates the way a real quantum compiler would.
+// (A security review, finding M6, caught this doc comment and
+// docs/QUANTUM_METHODOLOGY.md §2.2 both previously saying Grover's
+// marking oracle used ApplyPermutationUnitary, and both omitting
+// ApplyDiffusion from the oracle-level-unitary list entirely -- both
+// corrected here.) See docs/QUANTUM_METHODOLOGY.md for exactly which
+// operations are elementary-gate-decomposed and which are oracle-level
+// unitaries.
 type Circuit struct {
 	NumQubits int
 	State     []complex128
@@ -93,9 +102,26 @@ func NewCircuitWithRand(numQubits int, rng *rand.Rand) (*Circuit, error) {
 	return &Circuit{NumQubits: numQubits, State: state, rng: rng}, nil
 }
 
+// validateQubit panics with one consistent message if qubit is outside
+// [0, c.NumQubits) -- security review finding M2: before this, an
+// out-of-range qubit index produced a DIFFERENT failure mode depending
+// on which method and which direction (Measure(5) on a 3-qubit circuit
+// silently returned 0; ApplyCNOT(5,0)/ApplyControlledPhase(7,0,...) were
+// silent no-ops; ApplyCNOT(1,1) silently did nothing; ApplyH(5)/ApplyX(3)
+// panicked with Go's own "index out of range"; ApplyH(-1) panicked with
+// "negative shift amount"). Every Apply*/Measure method below now
+// validates every qubit index it takes through this one helper, the
+// same consistent-panic pattern ApplyPermutationUnitary already used.
+func validateQubit(qubit, numQubits int) {
+	if qubit < 0 || qubit >= numQubits {
+		panic(fmt.Sprintf("quantum: qubit index %d out of range [0,%d)", qubit, numQubits))
+	}
+}
+
 // ApplyH applies a Hadamard gate to qubit, an elementary one-qubit gate
 // putting a |0>/|1> basis state into equal superposition.
 func (c *Circuit) ApplyH(qubit int) {
+	validateQubit(qubit, c.NumQubits)
 	bit := 1 << qubit
 	invSqrt2 := complex(1/math.Sqrt2, 0)
 	for i := 0; i < len(c.State); i++ {
@@ -113,6 +139,7 @@ func (c *Circuit) ApplyH(qubit int) {
 // gate swapping the amplitudes of each basis pair differing only in
 // qubit's bit.
 func (c *Circuit) ApplyX(qubit int) {
+	validateQubit(qubit, c.NumQubits)
 	bit := 1 << qubit
 	for i := 0; i < len(c.State); i++ {
 		if i&bit != 0 {
@@ -127,6 +154,11 @@ func (c *Circuit) ApplyX(qubit int) {
 // when control is 1. An elementary two-qubit gate; this is how
 // ApplyCNOT entangles previously-independent qubits.
 func (c *Circuit) ApplyCNOT(control, target int) {
+	validateQubit(control, c.NumQubits)
+	validateQubit(target, c.NumQubits)
+	if control == target {
+		panic(fmt.Sprintf("quantum: ApplyCNOT: control and target must differ, both are %d", control))
+	}
 	controlBit := 1 << control
 	targetBit := 1 << target
 	for i := 0; i < len(c.State); i++ {
@@ -144,6 +176,8 @@ func (c *Circuit) ApplyCNOT(control, target int) {
 // (symmetric in its two arguments); internal/quantum's QFT is built
 // from this plus ApplyH.
 func (c *Circuit) ApplyControlledPhase(control, target int, theta float64) {
+	validateQubit(control, c.NumQubits)
+	validateQubit(target, c.NumQubits)
 	controlBit := 1 << control
 	targetBit := 1 << target
 	phase := cmplx.Exp(complex(0, theta))
@@ -232,6 +266,7 @@ func (c *Circuit) ApplyDiffusion() {
 // the observable consequence: measuring one half of an entangled pair
 // determines the other's later measurement).
 func (c *Circuit) Measure(qubit int) int {
+	validateQubit(qubit, c.NumQubits)
 	bit := 1 << qubit
 	var probOne float64
 	for i, a := range c.State {
@@ -271,13 +306,28 @@ func (c *Circuit) Measure(qubit int) int {
 func (c *Circuit) MeasureAll() int {
 	r := c.rng.Float64()
 	var cumulative float64
-	outcome := len(c.State) - 1 // fallback for float rounding landing exactly at 1.0
+	outcome := -1
+	lastNonZero := 0 // security review finding M4: the float-rounding fallback below must land on a state with a REAL amplitude
 	for i, a := range c.State {
-		cumulative += real(a)*real(a) + imag(a)*imag(a)
+		p := real(a)*real(a) + imag(a)*imag(a)
+		if p > 0 {
+			lastNonZero = i
+		}
+		cumulative += p
 		if r < cumulative {
 			outcome = i
 			break
 		}
+	}
+	if outcome == -1 {
+		// Float rounding left the summed probability just short of r
+		// (e.g. a state whose true probabilities sum to 1 but whose
+		// float64 sum is 1-epsilon) -- fall back to the last basis state
+		// with a NONZERO amplitude, never the literal last index
+		// (len(State)-1), which could have zero amplitude and make
+		// MeasureAll return an outcome the state never actually had any
+		// chance of producing.
+		outcome = lastNonZero
 	}
 	next := make([]complex128, len(c.State))
 	next[outcome] = 1
