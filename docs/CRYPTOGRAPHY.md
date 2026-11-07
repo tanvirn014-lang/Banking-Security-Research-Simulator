@@ -90,6 +90,11 @@ This is a hard requirement from the source spec's non-goals (§2.2) and is
 treated as a correctness requirement, not a style preference — see the
 qubit-bound error test in `ATTACK_SURFACES.md` §7.
 
+See `QUANTUM_METHODOLOGY.md` for the full research methodology: exactly
+what each of `internal/quantum`'s four experiments measures, what
+idealized-quantum-operation assumptions they depend on, and what cannot
+be concluded from any of them.
+
 ## 6. Known limitations (honest)
 
 - `crypto/mlkem`'s exact API has changed across Go versions; the
