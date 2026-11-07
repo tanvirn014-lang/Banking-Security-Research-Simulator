@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -132,6 +133,34 @@ func TestCLI_ForgedPrincipalStillRejectedServerSide(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unauthorized") {
 		t.Fatalf("expected a server-side unauthorized rejection, got: %v", err)
+	}
+}
+
+// TestCLI_TypoDetectionRuleID_RejectedAtWiring is the regression test
+// for security review finding I6: a typo'd or unknown rule ID in a
+// profile's detection_rules used to silently result in zero detection
+// rules registered, with nothing telling an operator that their
+// "hardened"-named profile was actually running no detection at all.
+func TestCLI_TypoDetectionRuleID_RejectedAtWiring(t *testing.T) {
+	profilePath := filepath.Join(t.TempDir(), "typo-profile.json")
+	const typoProfile = `{
+		"name": "hardened",
+		"crypto_profile": "standard",
+		"min_accepted_crypto_profile": "standard",
+		"protocol_auth_enforced": true,
+		"authz_enforced": true,
+		"atomicity_enforced": true,
+		"keystore_encrypted_at_rest": true,
+		"audit_hash_chained": true,
+		"detection_rules": ["balance-invariant-violaton"]
+	}`
+	if err := os.WriteFile(profilePath, []byte(typoProfile), 0o600); err != nil {
+		t.Fatalf("write temp profile: %v", err)
+	}
+
+	env := cliEnv{DataDir: t.TempDir(), ProfilePath: profilePath}
+	if _, err := runCLI(env, []string{"create-account", "--owner", "owner-1"}); err == nil {
+		t.Fatalf("expected a typo'd detection_rules entry to be rejected at wiring time, got no error")
 	}
 }
 

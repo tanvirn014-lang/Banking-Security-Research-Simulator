@@ -69,6 +69,44 @@ func NewEngine() Engine {
 	return &engine{}
 }
 
+// RegisterConfigured registers rule on e only if rule.ID() appears in
+// configured (typically a SecurityProfile's DetectionRules field) --
+// the mechanism for a profile to opt in to specific rules rather than
+// every wiring call hardcoding the same fixed set regardless of what the
+// profile actually names.
+func RegisterConfigured(e Engine, rule Rule, configured []domain.DetectionRuleID) {
+	for _, id := range configured {
+		if id == rule.ID() {
+			e.Register(rule)
+			return
+		}
+	}
+}
+
+// ValidateDetectionRules reports an error naming any ID in configured
+// that matches none of known -- catching a typo'd or unknown rule name
+// in a profile's detection_rules at wiring time, before it silently
+// results in zero detection rules actually running while the profile
+// still claims to be e.g. "hardened" (security review finding I6: this
+// gap only became a real risk once RegisterConfigured made registration
+// profile-gated instead of unconditional).
+func ValidateDetectionRules(configured, known []domain.DetectionRuleID) error {
+	knownSet := make(map[domain.DetectionRuleID]bool, len(known))
+	for _, id := range known {
+		knownSet[id] = true
+	}
+	var unknown []domain.DetectionRuleID
+	for _, id := range configured {
+		if !knownSet[id] {
+			unknown = append(unknown, id)
+		}
+	}
+	if len(unknown) > 0 {
+		return fmt.Errorf("unknown detection rule ID(s) %v (known: %v)", unknown, known)
+	}
+	return nil
+}
+
 func (e *engine) Register(r Rule) {
 	e.mu.Lock()
 	e.rules = append(e.rules, r)

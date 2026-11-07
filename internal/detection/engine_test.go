@@ -10,9 +10,46 @@ import (
 	_ "modernc.org/sqlite"
 
 	"banksec-lab/internal/audit"
+	"banksec-lab/internal/domain"
 	"banksec-lab/internal/ledger"
 	"banksec-lab/internal/testsupport"
 )
+
+func TestRegisterConfigured_OnlyRegistersListedRules(t *testing.T) {
+	rule := NewBalanceInvariantRule(&stubLedger{invariantOK: true})
+
+	e1 := NewEngine().(*engine)
+	RegisterConfigured(e1, rule, []domain.DetectionRuleID{"some-other-rule"})
+	if len(e1.rules) != 0 {
+		t.Fatalf("expected the rule not to be registered when its ID is absent from configured, got %d rules", len(e1.rules))
+	}
+
+	e2 := NewEngine().(*engine)
+	RegisterConfigured(e2, rule, []domain.DetectionRuleID{BalanceInvariantRuleID})
+	if len(e2.rules) != 1 {
+		t.Fatalf("expected the rule to be registered when its ID is present in configured, got %d rules", len(e2.rules))
+	}
+}
+
+// TestValidateDetectionRules_RejectsUnknownID is the regression test for
+// security review finding I6: a typo'd or unknown rule ID in a
+// profile's detection_rules used to silently result in zero rules
+// registered (RegisterConfigured just finds no match), with nothing to
+// tell an operator their "hardened" profile is actually running no
+// detection at all.
+func TestValidateDetectionRules_RejectsUnknownID(t *testing.T) {
+	known := []domain.DetectionRuleID{BalanceInvariantRuleID}
+
+	if err := ValidateDetectionRules([]domain.DetectionRuleID{BalanceInvariantRuleID}, known); err != nil {
+		t.Fatalf("expected a known rule ID to validate cleanly, got %v", err)
+	}
+	if err := ValidateDetectionRules(nil, known); err != nil {
+		t.Fatalf("expected an empty configured list to validate cleanly, got %v", err)
+	}
+	if err := ValidateDetectionRules([]domain.DetectionRuleID{"balance-invariant-violaton"}, known); err == nil {
+		t.Fatalf("expected a typo'd rule ID to be rejected, got no error")
+	}
+}
 
 // breakInvariant inserts a single, unmatched entry directly into the
 // ledger's storage, bypassing AppendTransaction's own balance check --

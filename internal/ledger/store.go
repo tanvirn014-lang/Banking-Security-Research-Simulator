@@ -19,6 +19,19 @@ type Entry struct {
 	Timestamp time.Time
 }
 
+// State is a full snapshot of the ledger: every entry plus the
+// invariant check's own result, taken together. Not returned by Store
+// itself -- see internal/harness/oracle.go, which builds one from a
+// single AllEntries call and computes ViolatingTxIDs in Go from the
+// returned Entries (not a second CheckInvariant query), so Entries and
+// ViolatingTxIDs can never disagree with each other, even under a
+// concurrent writer.
+type State struct {
+	Entries        []Entry
+	InvariantOK    bool
+	ViolatingTxIDs []domain.TransactionID
+}
+
 // Store is the double-entry ledger's storage interface.
 type Store interface {
 	// CreateAccount persists a new account with the given owner and
@@ -32,6 +45,10 @@ type Store interface {
 	AppendTransaction(ctx context.Context, entries []Entry) error
 	Balance(ctx context.Context, acct domain.AccountID) (domain.Money, error)
 	History(ctx context.Context, acct domain.AccountID) ([]Entry, error)
+	// AllEntries returns every entry across every account, in insertion
+	// order. Used by internal/harness's Oracle to build a full ledger
+	// snapshot for attack-scenario verification.
+	AllEntries(ctx context.Context) ([]Entry, error)
 	CheckInvariant(ctx context.Context) (ok bool, violatingTxIDs []domain.TransactionID, err error)
 	// Close releases the store's underlying resources (e.g. its database
 	// handle). Required for file-backed stores to be removable afterward.

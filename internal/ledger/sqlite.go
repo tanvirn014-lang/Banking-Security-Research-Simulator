@@ -149,6 +149,31 @@ func (s *sqliteStore) History(ctx context.Context, acct domain.AccountID) ([]Ent
 	return out, rows.Err()
 }
 
+func (s *sqliteStore) AllEntries(ctx context.Context) ([]Entry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tx_id, account_id, amount, timestamp FROM entries ORDER BY timestamp ASC, id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("query all entries: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Entry
+	for rows.Next() {
+		var txID, accountID string
+		var amount, ts int64
+		if err := rows.Scan(&txID, &accountID, &amount, &ts); err != nil {
+			return nil, fmt.Errorf("scan entry row: %w", err)
+		}
+		out = append(out, Entry{
+			TxID:      domain.TransactionID(txID),
+			AccountID: domain.AccountID(accountID),
+			Amount:    domain.Money(amount),
+			Timestamp: time.Unix(0, ts),
+		})
+	}
+	return out, rows.Err()
+}
+
 func (s *sqliteStore) CheckInvariant(ctx context.Context) (bool, []domain.TransactionID, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT tx_id FROM entries GROUP BY tx_id HAVING SUM(amount) != 0`)

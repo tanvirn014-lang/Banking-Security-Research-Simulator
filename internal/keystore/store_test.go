@@ -446,3 +446,55 @@ func TestRotate_RevokedKeyRejected(t *testing.T) {
 		t.Fatalf("expected ErrKeyRevoked when rotating a revoked key, got %v", err)
 	}
 }
+
+// TestMeta_NeverAuditsNorErrorsOnRevoked is the regression test for
+// Milestone 7 security review finding I4: Oracle.KeySnapshot used Get,
+// which (a) records a key_access audit event even for a purely
+// informational read, and (b) returns ErrKeyRevoked instead of usable
+// metadata for a revoked key. Meta must do neither.
+func TestMeta_NeverAuditsNorErrorsOnRevoked(t *testing.T) {
+	ctx := context.Background()
+	a := newTestAuditStream(t)
+	s := newTestKeystoreWithAudit(t, a)
+
+	meta, err := s.Generate(ctx, "standard")
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := s.Revoke(ctx, meta.ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	start := time.Now().Add(-time.Minute)
+	got, err := s.Meta(ctx, meta.ID)
+	if err != nil {
+		t.Fatalf("Meta on a revoked key: expected no error, got %v", err)
+	}
+	if got.RevokedAt == nil {
+		t.Fatalf("expected Meta to still report RevokedAt for a revoked key, got %+v", got)
+	}
+
+	events, err := a.Since(ctx, start)
+	if err != nil {
+		t.Fatalf("Since: %v", err)
+	}
+	for _, e := range events {
+		if e.Operation == "Meta" {
+			t.Fatalf("expected Meta to record no audit event, found %+v", e)
+		}
+	}
+	// Generate and Revoke (above) each correctly emit their own audit
+	// event -- only Meta itself must add none.
+	if len(events) != 2 {
+		t.Fatalf("expected exactly the 2 events from Generate+Revoke and none from Meta, got %+v", events)
+	}
+}
+
+func TestMeta_UnknownID(t *testing.T) {
+	ctx := context.Background()
+	s := newTestKeystore(t)
+
+	if _, err := s.Meta(ctx, "no-such-id"); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("expected ErrKeyNotFound, got %v", err)
+	}
+}

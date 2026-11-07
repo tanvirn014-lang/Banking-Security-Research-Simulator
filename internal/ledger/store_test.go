@@ -223,6 +223,32 @@ func TestHistory_OrderedByTime(t *testing.T) {
 	}
 }
 
+func TestAllEntries_ReturnsEveryAccountsEntries(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.AppendTransaction(ctx, []Entry{
+		{TxID: "tx1", AccountID: "a1", Amount: -100, Timestamp: time.Now()},
+		{TxID: "tx1", AccountID: "a2", Amount: 100, Timestamp: time.Now()},
+	}); err != nil {
+		t.Fatalf("AppendTransaction 1: %v", err)
+	}
+	if err := s.AppendTransaction(ctx, []Entry{
+		{TxID: "tx2", AccountID: "a3", Amount: -50, Timestamp: time.Now()},
+		{TxID: "tx2", AccountID: "a1", Amount: 50, Timestamp: time.Now()},
+	}); err != nil {
+		t.Fatalf("AppendTransaction 2: %v", err)
+	}
+
+	entries, err := s.AllEntries(ctx)
+	if err != nil {
+		t.Fatalf("AllEntries: %v", err)
+	}
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 entries across both transactions, got %d: %+v", len(entries), entries)
+	}
+}
+
 func TestCheckInvariant_OKAfterBalancedWrites(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

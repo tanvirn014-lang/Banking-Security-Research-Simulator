@@ -158,6 +158,18 @@ func wireClient(env cliEnv) (protocol.Client, func(), error) {
 		return nil, nil, fmt.Errorf("generate protocol auth keys: %w", err)
 	}
 
+	// A typo'd or unknown rule ID in profile.DetectionRules must fail
+	// loudly here, not silently result in zero rules actually running
+	// while the profile still claims e.g. "hardened" (security review
+	// finding I6).
+	knownDetectionRules := []domain.DetectionRuleID{detection.BalanceInvariantRuleID}
+	if err := detection.ValidateDetectionRules(profile.DetectionRules, knownDetectionRules); err != nil {
+		l.Close()
+		k.Close()
+		a.Close()
+		return nil, nil, fmt.Errorf("profile detection_rules: %w", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Wired as a background goroutine alongside the protocol server
@@ -165,7 +177,7 @@ func wireClient(env cliEnv) (protocol.Client, func(), error) {
 	// Engine must run as part of normal operation, not only be callable
 	// directly from a test.
 	detectionEngine := detection.NewEngine()
-	detectionEngine.Register(detection.NewBalanceInvariantRule(l))
+	detection.RegisterConfigured(detectionEngine, detection.NewBalanceInvariantRule(l), profile.DetectionRules)
 	if err := detectionEngine.Run(ctx, a); err != nil {
 		cancel()
 		l.Close()

@@ -36,6 +36,7 @@ func (s *stubLedger) Balance(ctx context.Context, acct domain.AccountID) (domain
 func (s *stubLedger) History(ctx context.Context, acct domain.AccountID) ([]ledger.Entry, error) {
 	return nil, nil
 }
+func (s *stubLedger) AllEntries(ctx context.Context) ([]ledger.Entry, error) { return nil, nil }
 func (s *stubLedger) CheckInvariant(ctx context.Context) (bool, []domain.TransactionID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

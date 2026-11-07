@@ -320,6 +320,25 @@ func (s *sqliteStore) Get(ctx context.Context, id string) (material []byte, meta
 	return material, meta, err
 }
 
+// Meta implements Store.Meta: a metadata-only read, no decryption, no
+// audit event, and no error for a revoked key (RevokedAt is simply set).
+func (s *sqliteStore) Meta(ctx context.Context, id string) (KeyMeta, error) {
+	var profile string
+	var createdAt int64
+	var rotatedAt, revokedAt sql.NullInt64
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT profile, created_at, rotated_at, revoked_at FROM keys WHERE id = ?`, id,
+	).Scan(&profile, &createdAt, &rotatedAt, &revokedAt)
+	if err == sql.ErrNoRows {
+		return KeyMeta{}, ErrKeyNotFound
+	}
+	if err != nil {
+		return KeyMeta{}, fmt.Errorf("query key meta: %w", err)
+	}
+	return metaFromRow(id, profile, createdAt, rotatedAt, revokedAt), nil
+}
+
 func (s *sqliteStore) Rotate(ctx context.Context, id string) (meta KeyMeta, err error) {
 	outcome := "ok"
 	defer func() {
