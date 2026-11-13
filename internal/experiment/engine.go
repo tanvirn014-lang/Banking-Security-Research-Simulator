@@ -212,6 +212,22 @@ func (e *Engine) runLoop(ctx context.Context, eff ExperimentSpec, gen Generator,
 	allPlans := true
 	anyProbe := false
 
+	// The token the generator writes where it needs the victim's account
+	// number. Deliberately a placeholder and not a resolved identifier:
+	// identifiers are random per environment and every probe runs in its
+	// own, so anything resolved here would exist nowhere the probes run.
+	// The evaluator substitutes the real one. See
+	// VictimAccountPlaceholder.
+	targetAccount := ""
+	if eff.DiscloseTargetAccount {
+		if e.assistantProvider == nil {
+			rec.Errors = append(rec.Errors,
+				"disclose_target_account was requested but this engine has no assistant, so no probe could use it")
+		} else {
+			targetAccount = VictimAccountPlaceholder
+		}
+	}
+
 	rec.StopReason = StopReasonGeneratorExhausted
 loop:
 	for {
@@ -236,6 +252,7 @@ loop:
 			ActionsSpent:     validator.Spent(),
 			ActionsRemaining: validator.Remaining(),
 			Attempted:        summaries,
+			TargetAccount:    targetAccount,
 		}
 
 		cand, genErr := gen.Next(ctx, obs)

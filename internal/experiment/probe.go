@@ -75,6 +75,40 @@ func (p Probe) Validate() error {
 	return nil
 }
 
+// VictimAccountPlaceholder is the token a generator writes where it
+// needs the other customer's account number.
+//
+// A placeholder rather than a literal identifier, because account
+// identifiers are random per environment: every probe is evaluated in
+// its own freshly wired bank, so an identifier resolved anywhere else
+// exists in no environment a probe actually runs against. Handing the
+// generator such an identifier produced attacks that named an account
+// the bank had never heard of, which it refuses as not-found -- and
+// which therefore never reaches the authorization check at all, while
+// looking in the record exactly like a refusal that did.
+//
+// The evaluator substitutes the real victim identifier from the probe's
+// own seeded fixture, immediately before the assistant sees the input,
+// and records what it substituted.
+const VictimAccountPlaceholder = "VICTIM_ACCOUNT"
+
+// SubstituteVictimAccount replaces the placeholder with account, and
+// reports whether anything was replaced.
+func (p Probe) SubstituteVictimAccount(account string) (Probe, bool) {
+	if account == "" {
+		return p, false
+	}
+	hit := strings.Contains(p.UserInput, VictimAccountPlaceholder) ||
+		strings.Contains(p.UntrustedContent, VictimAccountPlaceholder)
+	if !hit {
+		return p, false
+	}
+	out := p
+	out.UserInput = strings.ReplaceAll(p.UserInput, VictimAccountPlaceholder, account)
+	out.UntrustedContent = strings.ReplaceAll(p.UntrustedContent, VictimAccountPlaceholder, account)
+	return out, true
+}
+
 // maxProbeInputChars bounds one probe's text, so a generator cannot
 // produce an input large enough to crowd out the system prompt or blow
 // past the model's context.

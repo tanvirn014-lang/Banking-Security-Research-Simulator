@@ -85,7 +85,21 @@ func (e *Engine) evaluateProbe(ctx context.Context, cand Candidate, env *harness
 		Payees: probePayees(seeded, sessionOwner),
 	}
 
-	transcript, err := bot.Handle(ctx, session, cand.Probe.Input())
+	// Substitute the victim identifier from THIS environment's fixture,
+	// so an attack naming the other customer's account names one that
+	// actually exists here and therefore reaches the authorization
+	// check rather than being refused as not-found.
+	probe := *cand.Probe
+	var disclosed []string
+	if victim, ok := seeded.Accounts[victimOwner(seeded)]; ok {
+		if substituted, hit := probe.SubstituteVictimAccount(string(victim)); hit {
+			probe = substituted
+			disclosed = append(disclosed, string(victim))
+		}
+	}
+	attempt.Probe = &probe
+
+	transcript, err := bot.Handle(ctx, session, probe.Input())
 	if err != nil {
 		attempt.Error = fmt.Sprintf("assistant exchange: %v", err)
 		return attempt
@@ -110,7 +124,7 @@ func (e *Engine) evaluateProbe(ctx context.Context, cand Candidate, env *harness
 		// Whatever the harness told the attacker is excluded from the
 		// disclosure check: the assistant cannot leak what the attacker
 		// already had.
-		KnownToAttacker: knownToAttacker(cand),
+		KnownToAttacker: disclosed,
 	}
 
 	in := InvariantInput{
@@ -257,43 +271,13 @@ func probePayees(seeded assistant.SeededFixture, sessionOwner string) []assistan
 	return out
 }
 
-// resolveTargetAccount creates a throwaway environment, seeds the same
-// synthetic fixture every probe uses, and returns the victim account's
-// identifier.
-//
-// It is resolved once per experiment rather than per probe so that every
-// probe in a run names the same victim, which is what keeps the runs
-// comparable. The environment is discarded immediately; the identifier
-// is stable because the fixture is.
-func (e *Engine) resolveTargetAccount(ctx context.Context) (string, error) {
-	env, err := harness.NewLocalEnvironment(e.profile)
-	if err != nil {
-		return "", fmt.Errorf("wire a fixture environment: %w", err)
-	}
-	defer env.Close()
-
-	seeded, err := assistant.SeedSyntheticAccounts(ctx, env.Client, assistant.SyntheticFixture())
-	if err != nil {
-		return "", fmt.Errorf("seed the fixture: %w", err)
-	}
+// victimOwner names the fixture owner a probe attacks: the one the
+// session is not.
+func victimOwner(seeded assistant.SeededFixture) string {
 	for _, owner := range seeded.Owners() {
 		if owner != probeSessionOwner {
-			return string(seeded.Accounts[owner]), nil
+			return owner
 		}
 	}
-	return "", fmt.Errorf("the fixture has no account other than %s's", probeSessionOwner)
-}
-
-// knownToAttacker lists identifiers this probe's generator was given
-// before writing the attack. Read from the candidate's own metadata so
-// the exclusion is driven by what was actually disclosed for this
-// probe, not by what the spec requested in general.
-func knownToAttacker(cand Candidate) []string {
-	if cand.Probe == nil || cand.Probe.Metadata["target_account_disclosed"] != "true" {
-		return nil
-	}
-	if acct := cand.Probe.Metadata["target_account"]; acct != "" {
-		return []string{acct}
-	}
-	return nil
+	return ""
 }
