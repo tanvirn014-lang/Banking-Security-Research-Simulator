@@ -34,6 +34,7 @@ func runAssistant(env cliEnv, args []string) (string, error) {
 	turns := fs.Int("turns", 4, "how many times the model may be consulted for one request")
 	toolBudget := fs.Int("tool-budget", 0, "override the gateway's tool-call budget")
 	payee := fs.String("payee", "", "add a synthetic customer as a saved transfer destination, e.g. mallory")
+	expectAmount := fs.Int64("expect-amount", 0, "only approve a drafted transfer whose amount matches this, in minor units; 0 disables the check")
 	approve := fs.Bool("approve-transfer", false, "grant the customer approval for the first transfer the assistant drafts (the happy path; off by default)")
 	list := fs.Bool("list", false, "list the tool catalog and security boundary, and talk to no model")
 	showPrompt := fs.Bool("show-prompt", false, "print the assistant's system prompt and exit")
@@ -137,11 +138,39 @@ func runAssistant(env cliEnv, args []string) (string, error) {
 		return "", err
 	}
 
-	// The optional happy path: approve the first drafted transfer, the
-	// way a real customer would on a separate channel, then let the
-	// assistant finish.
+	// The optional happy path: approve a drafted transfer the way a real
+	// customer would, on a separate channel, then let the assistant
+	// finish.
+	//
+	// What is being approved is printed BEFORE the approval, from the
+	// gateway's own record. The whole value of this control is that a
+	// human sees the transfer; approving whatever the assistant drafted
+	// first, sight unseen, reduces it to a rubber stamp and would wave
+	// through an injected draft as readily as a legitimate one
+	// (assessment finding F-06).
 	if *approve {
 		if id := firstConfirmationID(transcript); id != "" {
+			from, to, amount, found := gateway.PendingTransfer(id)
+			if !found {
+				fmt.Fprintf(&report, "cannot approve %s: no such pending transfer\n\n", id)
+				report.WriteString(renderTranscript(transcript, gateway))
+				return report.String(), nil
+			}
+
+			report.WriteString("PENDING TRANSFER AWAITING APPROVAL\n")
+			fmt.Fprintf(&report, "  confirmation: %s\n", id)
+			fmt.Fprintf(&report, "  debit:        %s\n", from)
+			fmt.Fprintf(&report, "  credit:       %s\n", to)
+			fmt.Fprintf(&report, "  amount:       %d (minor units)\n", amount)
+
+			if *expectAmount > 0 && int64(amount) != *expectAmount {
+				fmt.Fprintf(&report, "  NOT APPROVED: the drafted amount differs from the --expect-amount of %d.\n", *expectAmount)
+				report.WriteString("  An altered or injected draft looks exactly like this.\n\n")
+				report.WriteString(renderTranscript(transcript, gateway))
+				return report.String(), nil
+			}
+			report.WriteString("  approving, because --approve-transfer was passed\n\n")
+
 			if err := gateway.ApproveTransfer(session.ID, id); err != nil {
 				fmt.Fprintf(&report, "approval failed: %v\n\n", err)
 			} else {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -103,7 +104,11 @@ type Payee struct {
 
 // Limits bound what the assistant can cause.
 type Limits struct {
-	// MaxToolCalls is the total tool budget for a gateway's lifetime.
+	// MaxToolCalls is the total budget of tool *proposals* for a
+	// gateway's lifetime. A refused proposal is charged too: a model
+	// emitting unrecognised tool names must not be able to drive
+	// unbounded work, so the budget bounds what is attempted rather than
+	// what succeeds.
 	MaxToolCalls int `json:"max_tool_calls"`
 	// MaxTransferAmount caps one prepared transfer, in minor units.
 	MaxTransferAmount domain.Money `json:"max_transfer_amount"`
@@ -465,6 +470,80 @@ func (g *Gateway) consumeBudget() bool {
 	return true
 }
 
+// ownsAccount reports whether the session's own record of its accounts
+// includes account.
+//
+// This is the gateway's *independent* ownership check, and it exists
+// because delegating ownership entirely to the bank made the gateway
+// contribute nothing to the property it claims to enforce (assessment
+// finding F-02). The bank's authorization layer remains the second
+// layer and still runs on every call; neither is trusted alone.
+//
+// It fails closed. A session with no declared accounts owns nothing
+// here, so a caller that forgets to populate Session.Accounts gets
+// refusals rather than an unchecked gateway -- the same reasoning that
+// makes config.Load reject an absent enforcement flag.
+func (s Session) ownsAccount(account string) bool {
+	for _, owned := range s.Accounts {
+		if string(owned) == account {
+			return true
+		}
+	}
+	return false
+}
+
+// requireOwnership refuses a call targeting an account the session does
+// not declare. ok is false when the call must not proceed.
+func (g *Gateway) requireOwnership(session Session, inv *ToolInvocation, account, argName string) bool {
+	if session.ownsAccount(account) {
+		return true
+	}
+	inv.Decision = DecisionRefusedUnauthorized
+	if len(session.Accounts) == 0 {
+		inv.Reason = fmt.Sprintf("this session declares no accounts, so %q cannot be acted on", argName)
+		return false
+	}
+	inv.Reason = fmt.Sprintf("%s is not an account the signed-in customer owns", argName)
+	return false
+}
+
+// destinationReachable reports whether a transfer may be drafted to
+// account. ok is false when it may not.
+//
+// The destination must be either another of the customer's own accounts
+// or a payee the application has saved for them. It is deliberately not
+// established by asking the bank: under a hardened profile the bank
+// cannot distinguish "this account does not exist" from "this account
+// is not yours", so a probe there would answer the wrong question. An
+// application-held allowlist answers it exactly, needs no banking call,
+// and fails closed.
+//
+// This is also the control that stops a model inventing a destination.
+// Observed during live testing: asked to transfer to a payee it had not
+// been told about, llama3.1:8b incremented the last digit of the
+// customer's own account number and drafted to that. An allowlist makes
+// such a draft impossible rather than merely futile.
+func (g *Gateway) destinationReachable(_ context.Context, session Session, inv *ToolInvocation, account string) bool {
+	if session.ownsAccount(account) {
+		return true
+	}
+	for _, payee := range session.Payees {
+		if string(payee.Account) == account {
+			return true
+		}
+	}
+
+	inv.Decision = DecisionRefusedUnauthorized
+	if len(session.Payees) == 0 {
+		inv.Reason = fmt.Sprintf(
+			"%s is neither one of the customer's own accounts nor a saved payee, and this session has no saved payees", account)
+	} else {
+		inv.Reason = fmt.Sprintf(
+			"%s is neither one of the customer's own accounts nor one of their saved payees", account)
+	}
+	return false
+}
+
 // send issues one banking request with the session's own principal.
 // There is no code path here that takes an actor from anywhere else.
 func (g *Gateway) send(ctx context.Context, session Session, op string, params map[string]string) (protocol.Response, error) {
@@ -480,6 +559,9 @@ func (g *Gateway) send(ctx context.Context, session Session, op string, params m
 // here, rather than this gateway keeping a second, possibly divergent
 // copy of the ownership rules.
 func (g *Gateway) runRead(ctx context.Context, session Session, inv *ToolInvocation, op, account string) {
+	if !g.requireOwnership(session, inv, account, "account") {
+		return
+	}
 	resp, err := g.send(ctx, session, op, map[string]string{"account": account})
 	if err != nil {
 		inv.Decision = DecisionError
@@ -500,6 +582,9 @@ func (g *Gateway) runRead(ctx context.Context, session Session, inv *ToolInvocat
 // runSummary composes a short summary from a balance read. It adds no
 // new capability: it is the same authorized read, presented compactly.
 func (g *Gateway) runSummary(ctx context.Context, session Session, inv *ToolInvocation, account string) {
+	if !g.requireOwnership(session, inv, account, "account") {
+		return
+	}
 	resp, err := g.send(ctx, session, "balance", map[string]string{"account": account})
 	if err != nil {
 		inv.Decision = DecisionError
@@ -514,9 +599,13 @@ func (g *Gateway) runSummary(ctx context.Context, session Session, inv *ToolInvo
 
 	inv.Decision = DecisionExecuted
 	inv.Executed = true
+	// No "owner" field. The bank does not return one, and asserting the
+	// caller's own name as the account's owner was a fabrication that
+	// masked exactly the cross-account read an auditor would look for
+	// (assessment finding F-05). The gateway reports what the bank
+	// returned and nothing it merely assumed.
 	inv.Result = map[string]string{
 		"account": account,
-		"owner":   string(session.Principal.ID),
 		"balance": resp.Data["balance"],
 	}
 }
@@ -543,6 +632,10 @@ func (g *Gateway) runPrepareTransfer(ctx context.Context, session Session, inv *
 		return
 	}
 
+	if !g.requireOwnership(session, inv, args["from"], "from") {
+		return
+	}
+
 	resp, err := g.send(ctx, session, "balance", map[string]string{"account": args["from"]})
 	if err != nil {
 		inv.Decision = DecisionError
@@ -552,6 +645,21 @@ func (g *Gateway) runPrepareTransfer(ctx context.Context, session Session, inv *
 	if !resp.OK {
 		inv.Decision = classifyRefusal(resp.Error)
 		inv.Reason = fmt.Sprintf("cannot draft a transfer from %s: %s", args["from"], resp.Error)
+		return
+	}
+
+	// The destination must already exist. Drafting a transfer to an
+	// account the bank does not know produces a confirmation that can
+	// only ever fail -- and because the confirmation is claimed before
+	// execution, failing consumes the customer's approval and forces
+	// them to approve again (assessment finding F-04). Checking here
+	// means an unreachable transfer is never drafted at all.
+	//
+	// Reachability is established with the session's own authority, so
+	// this check can confirm a destination the customer is entitled to
+	// see. A destination they cannot see is refused as unverifiable
+	// rather than silently drafted.
+	if !g.destinationReachable(ctx, session, inv, args["to"]) {
 		return
 	}
 
@@ -714,7 +822,28 @@ func (g *Gateway) ExecutedCount() int {
 	return n
 }
 
-// Remaining reports how much tool budget is left.
+// RefusedCount is how many proposals the gateway refused.
+//
+// Reported separately from ExecutedCount because the gateway's budget
+// bounds *proposals*, not executions: a call naming a tool that does not
+// exist still consumes budget, deliberately, so that a model emitting
+// nonsense cannot drive unbounded work. That differs from
+// experiment.Validator, which charges only actions that reached the
+// simulator, and the two must not be read as the same figure
+// (assessment finding F-03).
+func (g *Gateway) RefusedCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := 0
+	for _, inv := range g.log {
+		if !inv.Executed {
+			n++
+		}
+	}
+	return n
+}
+
+// Remaining reports how much of the proposal budget is left.
 func (g *Gateway) Remaining() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -740,21 +869,63 @@ func classifyRefusal(msg string) Decision {
 	}
 }
 
+// historyResultKey is the key the banking server returns transaction
+// history under (see protocol/server.go's "history" case). Named here
+// because an earlier version of limitResult capped a key called
+// "entries", which the server never returns, so the cap silently did
+// nothing and a 60-entry history reached the model whole (assessment
+// finding F-01).
+const historyResultKey = "history"
+
 // limitResult caps how much data one tool result carries back into the
 // model's context.
+//
+// History arrives as a JSON array. It is decoded, truncated to
+// maxEntries, and re-encoded, with a sibling field stating how many
+// entries were withheld -- so the model is told its view is partial
+// rather than being left to assume it is complete. A payload that does
+// not decode is truncated by length instead, because an undecodable
+// payload is exactly the case where an uncapped one would do the most
+// damage.
 func limitResult(data map[string]string, maxEntries int) map[string]string {
 	out := make(map[string]string, len(data))
 	for k, v := range data {
-		if k == "entries" && maxEntries > 0 {
-			parts := strings.Split(v, ";")
-			if len(parts) > maxEntries {
-				v = strings.Join(parts[:maxEntries], ";") + fmt.Sprintf(";...(%d more withheld)", len(parts)-maxEntries)
-			}
-		}
 		out[k] = v
 	}
+
+	raw, present := out[historyResultKey]
+	if !present || maxEntries <= 0 {
+		return out
+	}
+
+	var entries []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		if len(raw) > maxHistoryBytes {
+			out[historyResultKey] = raw[:maxHistoryBytes]
+			out["history_truncated"] = "true"
+			out["history_note"] = fmt.Sprintf(
+				"this history could not be parsed and was cut to %d bytes; treat it as incomplete", maxHistoryBytes)
+		}
+		return out
+	}
+
+	if len(entries) <= maxEntries {
+		return out
+	}
+
+	kept, err := json.Marshal(entries[:maxEntries])
+	if err != nil {
+		return out
+	}
+	out[historyResultKey] = string(kept)
+	out["history_entries_withheld"] = strconv.Itoa(len(entries) - maxEntries)
+	out["history_note"] = fmt.Sprintf(
+		"showing the %d most recent of %d entries; the rest were withheld", maxEntries, len(entries))
 	return out
 }
+
+// maxHistoryBytes bounds an unparseable history payload.
+const maxHistoryBytes = 4096
 
 // newConfirmationID mints an unguessable confirmation id. It comes from
 // crypto/rand and never from the conversation, so no amount of prompting

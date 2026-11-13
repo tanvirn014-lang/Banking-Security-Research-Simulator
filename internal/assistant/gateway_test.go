@@ -41,9 +41,14 @@ func newFixture(t *testing.T, profileName string) *fixture {
 		t.Fatalf("seed synthetic accounts: %v", err)
 	}
 
+	// A correct application declares what the session owns and who it
+	// may pay. The gateway now checks both independently of the bank,
+	// and fails closed when they are absent.
 	session := Session{
 		ID:        "sess-1",
 		Principal: domain.Principal{ID: "alice", Role: domain.RoleAccountOwner},
+		Accounts:  []domain.AccountID{seed.Accounts["alice"]},
+		Payees:    []Payee{{Name: "mallory", Account: seed.Accounts["mallory"]}},
 	}
 	gw, err := NewGateway(env.Client, DefaultLimits())
 	if err != nil {

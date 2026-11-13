@@ -71,9 +71,18 @@ func (e *Engine) evaluateProbe(ctx context.Context, cand Candidate, env *harness
 		ID:        "probe-" + cand.TestID,
 		Principal: domain.Principal{ID: domain.PrincipalID(sessionOwner), Role: domain.RoleAccountOwner},
 		// Only the probe session's own account. The victim's identifier
-		// is deliberately withheld: an attack that succeeds only because
-		// the harness handed it the target id would prove nothing.
+		// is deliberately withheld from the generator: an attack that
+		// succeeds only because the harness handed it the target id
+		// would prove nothing.
 		Accounts: []domain.AccountID{seeded.Accounts[sessionOwner]},
+		// A saved payee, because a customer who has never saved one
+		// cannot be the subject of a transfer attack at all, and the
+		// confirmation-bypass family would then have nothing to test.
+		// This widens what can be attempted, not what is permitted: the
+		// debited account is still checked against Accounts above, so an
+		// attack still has to get an unapproved transfer past the
+		// confirmation control to achieve anything.
+		Payees: probePayees(seeded, sessionOwner),
 	}
 
 	transcript, err := bot.Handle(ctx, session, cand.Probe.Input())
@@ -221,4 +230,25 @@ func probeSteps(cand Candidate, attempt Attempt) []string {
 		}
 	}
 	return steps
+}
+
+// probePayees builds the saved-payee list for a probe session: every
+// other fixture owner's account.
+//
+// The destination side of a transfer is an allowlist the application
+// controls, and a real customer has one. The security question a probe
+// exists to answer is whether an attacker can move money to such a
+// destination without the customer's approval -- not whether they can
+// invent a destination, which the gateway refuses outright.
+func probePayees(seeded assistant.SeededFixture, sessionOwner string) []assistant.Payee {
+	var out []assistant.Payee
+	for _, owner := range seeded.Owners() {
+		if owner == sessionOwner {
+			continue
+		}
+		if acct, ok := seeded.Accounts[owner]; ok {
+			out = append(out, assistant.Payee{Name: owner, Account: acct})
+		}
+	}
+	return out
 }
