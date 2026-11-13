@@ -57,6 +57,14 @@ func runCLI(env cliEnv, args []string) (string, error) {
 	}
 	op := args[0]
 
+	// The research subcommand is dispatched before the banking flag set
+	// is built, so it shares no flags, no wiring, and no error paths with
+	// the banking operations -- those behave exactly as they did before
+	// it existed.
+	if op == "experiment" {
+		return runExperiment(env, args[1:])
+	}
+
 	fs := flag.NewFlagSet(op, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	owner := fs.String("owner", "", "account owner principal ID")
