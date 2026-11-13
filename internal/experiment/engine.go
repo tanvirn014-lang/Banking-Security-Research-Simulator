@@ -7,9 +7,11 @@ import (
 	"sort"
 	"time"
 
+	"banksec-lab/internal/assistant"
 	"banksec-lab/internal/config"
 	"banksec-lab/internal/finding"
 	"banksec-lab/internal/harness"
+	"banksec-lab/internal/llm"
 )
 
 // categorySeverity bands a baseline scenario's confirmed success by the
@@ -49,6 +51,17 @@ type Engine struct {
 	profile    config.SecurityProfile
 	invariants []Invariant
 	revision   string
+	// assistantProvider is the model the banking assistant under test
+	// runs on. Nil means probe candidates cannot be evaluated, which is
+	// reported as an attempt error rather than silently skipped.
+	assistantProvider llm.Provider
+	assistantLimits   assistant.Limits
+	assistantTurns    int
+	// generatorProvider is the model that writes adversarial inputs. It
+	// is deliberately a separate field from assistantProvider: the
+	// attacker and the target must be configurable independently, so
+	// that changing one cannot silently change the other.
+	generatorProvider llm.Provider
 }
 
 // EngineOption configures an Engine.
@@ -69,6 +82,21 @@ func WithSourceRevision(rev string) EngineOption {
 // harness.NewRunner.
 func WithRunner(r harness.Runner) EngineOption {
 	return func(e *Engine) { e.runner = r }
+}
+
+// WithAssistant enables probe candidates by supplying the model the
+// banking assistant under test runs on, plus its gateway limits and
+// turn budget. Without it, a probe candidate is recorded as an error:
+// an experiment that cannot run the system under test has produced no
+// evidence, and saying so is better than reporting an empty result as a
+// secure one.
+func WithAssistant(provider llm.Provider, limits assistant.Limits, maxTurns int) EngineOption {
+	return func(e *Engine) {
+		e.assistantProvider = provider
+		e.assistantLimits = limits
+		e.assistantTurns = maxTurns
+		e.invariants = append(e.invariants, AssistantInvariants()...)
+	}
 }
 
 // NewEngine builds an engine that runs experiments against profile,
@@ -105,9 +133,26 @@ func (e *Engine) NewGenerator(spec ExperimentSpec) (Generator, error) {
 		return NewStaticGenerator(e.registry, eff.SeedScenarios, eff.Safety.AllowPrivileged)
 	case GeneratorMutation:
 		return NewMutationGenerator(e.registry, eff)
+	case GeneratorLLM:
+		if e.assistantProvider == nil {
+			return nil, fmt.Errorf("experiment engine: the llm generator needs an assistant to test " +
+				"(construct the engine with WithAssistant)")
+		}
+		if e.generatorProvider == nil {
+			return nil, fmt.Errorf("experiment engine: the llm generator needs its own model " +
+				"(construct the engine with WithAttackGenerator)")
+		}
+		return NewLLMGenerator(e.generatorProvider, eff)
 	default:
 		return nil, fmt.Errorf("experiment engine: generator %q is not implemented", eff.Generator)
 	}
+}
+
+// WithAttackGenerator supplies the model that writes adversarial
+// inputs. Kept separate from WithAssistant so the attacker and the
+// target are configured independently and can be different models.
+func WithAttackGenerator(provider llm.Provider) EngineOption {
+	return func(e *Engine) { e.generatorProvider = provider }
 }
 
 // Run executes one experiment end to end and returns its record.
@@ -165,6 +210,7 @@ func (e *Engine) runLoop(ctx context.Context, eff ExperimentSpec, gen Generator,
 	var rawFindings []finding.Finding
 	var summaries []AttemptSummary
 	allPlans := true
+	anyProbe := false
 
 	rec.StopReason = StopReasonGeneratorExhausted
 loop:
@@ -216,6 +262,9 @@ loop:
 		if cand.Plan == nil {
 			allPlans = false
 		}
+		if cand.Probe != nil {
+			anyProbe = true
+		}
 
 		attempt := e.evaluate(ctx, cand, validator)
 		rec.Attempts = append(rec.Attempts, attempt)
@@ -246,7 +295,7 @@ loop:
 	rec.DurationMS = rec.FinishedAt.Sub(started).Milliseconds()
 	rec.ActionsSpent = validator.Spent()
 	rec.Findings = finding.Dedupe(rawFindings)
-	rec.Reproducibility = reproducibilityOf(gen, allPlans, len(rec.Attempts))
+	rec.Reproducibility = reproducibilityOf(gen, allPlans, anyProbe, len(rec.Attempts))
 
 	return rec
 }
@@ -263,6 +312,7 @@ func (e *Engine) evaluate(ctx context.Context, cand Candidate, validator *Valida
 		SourceScenarioID: cand.SourceScenarioID,
 		Mutations:        cand.Mutations,
 		Plan:             cand.Plan,
+		Probe:            cand.Probe,
 	}
 	defer func() { attempt.DurationMS = time.Since(start).Milliseconds() }()
 
@@ -273,10 +323,14 @@ func (e *Engine) evaluate(ctx context.Context, cand Candidate, validator *Valida
 	}
 	defer env.Close()
 
-	if cand.Plan != nil {
+	switch {
+	case cand.Plan != nil:
 		return e.evaluatePlan(ctx, cand, validator, env, attempt)
+	case cand.Probe != nil:
+		return e.evaluateProbe(ctx, cand, env, attempt)
+	default:
+		return e.evaluateScenario(ctx, cand, env, attempt)
 	}
-	return e.evaluateScenario(ctx, cand, env, attempt)
 }
 
 // evaluatePlan runs a declarative candidate. The plan's own scenario
@@ -358,6 +412,10 @@ func (e *Engine) evaluateScenario(ctx context.Context, cand Candidate, env *harn
 // from its Exec's own claim: harness.Runner discards Exec's return value
 // entirely.
 func (e *Engine) findingsFor(cand Candidate, attempt Attempt, eff ExperimentSpec) []finding.Finding {
+	if cand.Probe != nil {
+		return e.probeFindings(cand, attempt, eff)
+	}
+
 	repro := finding.Reproduction{
 		ExperimentID: eff.ExperimentID,
 		TestID:       attempt.TestID,
@@ -479,9 +537,22 @@ func renderSteps(steps []Step) []string {
 	return out
 }
 
-func reproducibilityOf(gen Generator, allPlans bool, attempts int) Reproducibility {
+func reproducibilityOf(gen Generator, allPlans, anyProbe bool, attempts int) Reproducibility {
 	if attempts == 0 {
 		return Reproducibility{Note: "no candidate was evaluated"}
+	}
+	if anyProbe {
+		// A probe's adversarial text is recorded verbatim and can be
+		// replayed exactly, but the assistant answering it is a language
+		// model: the same input can take a different path on a new run
+		// even at temperature zero. So the input replays and the outcome
+		// may not, which is a different claim from either of the others.
+		return Reproducibility{
+			ExactReplaySupported: false,
+			Note: "this run includes assistant probes; their adversarial inputs are recorded verbatim and can be " +
+				"replayed exactly, but the assistant is a language model, so replaying an input may not reproduce " +
+				"the same outcome -- reproducing a finding and reproducing a run are different claims here",
+		}
 	}
 	if !allPlans {
 		return Reproducibility{

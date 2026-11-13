@@ -140,6 +140,22 @@ type Candidate struct {
 	Plan *ActionPlan `json:"plan,omitempty"`
 	// Scenario is set for a baseline candidate drawn from the registry.
 	Scenario *harness.Scenario `json:"-"`
+	// Probe is set for a candidate that attacks the banking AI
+	// assistant with an adversarial message rather than with banking
+	// operations.
+	Probe *Probe `json:"probe,omitempty"`
+}
+
+// kindCount reports how many of the three candidate shapes are set.
+// Exactly one must be.
+func (c Candidate) kindCount() int {
+	n := 0
+	for _, set := range []bool{c.Plan != nil, c.Scenario != nil, c.Probe != nil} {
+		if set {
+			n++
+		}
+	}
+	return n
 }
 
 // Validate reports whether the candidate is structurally usable. A
@@ -152,11 +168,16 @@ func (c Candidate) Validate() error {
 	if c.GeneratorID == "" {
 		return errors.New("candidate has no generator id")
 	}
-	if (c.Plan == nil) == (c.Scenario == nil) {
-		return errors.New("candidate must carry exactly one of Plan or Scenario")
+	if c.kindCount() != 1 {
+		return errors.New("candidate must carry exactly one of Plan, Scenario or Probe")
 	}
 	if c.Plan != nil && c.Plan.Len() == 0 {
 		return errors.New("candidate plan proposes no actions")
+	}
+	if c.Probe != nil {
+		if err := c.Probe.Validate(); err != nil {
+			return err
+		}
 	}
 	if len(c.Mutations) > 0 && c.Plan == nil {
 		return errors.New("candidate claims mutations but carries no plan describing them")

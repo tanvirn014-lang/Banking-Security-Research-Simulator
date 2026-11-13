@@ -61,6 +61,11 @@ type InvariantInput struct {
 	Before  Snapshot
 	After   Snapshot
 	Steps   []Step
+	// Assistant is set only for a candidate that exercised the banking
+	// AI assistant. An invariant about the assistant reports
+	// inconclusive when it is nil, rather than drawing a conclusion
+	// from evidence it does not have.
+	Assistant *AssistantEvidence
 }
 
 // InvariantVerdict is one Check's conclusion, with the reasoning and the

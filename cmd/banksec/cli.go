@@ -64,6 +64,9 @@ func runCLI(env cliEnv, args []string) (string, error) {
 	if op == "experiment" {
 		return runExperiment(env, args[1:])
 	}
+	if op == "assistant" {
+		return runAssistant(env, args[1:])
+	}
 
 	fs := flag.NewFlagSet(op, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

@@ -10,9 +10,11 @@ import (
 	"sort"
 	"strings"
 
+	"banksec-lab/internal/assistant"
 	"banksec-lab/internal/config"
 	"banksec-lab/internal/experiment"
 	"banksec-lab/internal/harness"
+	"banksec-lab/internal/llm"
 )
 
 // experimentDefaults are the budget a bare `banksec experiment` runs
@@ -47,6 +49,7 @@ func runExperiment(env cliEnv, args []string) (string, error) {
 	allowPrivileged := fs.Bool("allow-privileged", false, "include scenarios that use the harness insider bypass")
 	stopOnViolation := fs.Bool("stop-on-violation", false, "halt at the first oracle-confirmed violation")
 	out := fs.String("out", "", "write the full machine-readable record to this path")
+	llmConfig := fs.String("llm-config", "", "path to the LLM settings file (default configs/llm.json beside the security profiles)")
 	list := fs.Bool("list", false, "list the available scenarios, seed workflows and invariants, and run nothing")
 	compare := fs.Bool("compare", false, "run both generators at the same budget and compare them")
 
@@ -83,7 +86,28 @@ func runExperiment(env cliEnv, args []string) (string, error) {
 	if err := harness.RegisterAllScenarios(reg); err != nil {
 		return "", fmt.Errorf("register scenarios: %w", err)
 	}
-	eng, err := experiment.NewEngine(reg, profile)
+	var engineOpts []experiment.EngineOption
+	if experiment.GeneratorType(*generator) == experiment.GeneratorLLM {
+		settings, serr := loadLLMSettings(env, *llmConfig)
+		if serr != nil {
+			return "", serr
+		}
+		ctx := context.Background()
+		target, terr := buildProvider(ctx, settings.Assistant, llm.CapabilityTools)
+		if terr != nil {
+			return "", fmt.Errorf("assistant model: %w", terr)
+		}
+		attacker, aerr := buildProvider(ctx, settings.Generator)
+		if aerr != nil {
+			return "", fmt.Errorf("attack generator model: %w", aerr)
+		}
+		engineOpts = append(engineOpts,
+			experiment.WithAssistant(target, assistant.DefaultLimits(), 4),
+			experiment.WithAttackGenerator(attacker),
+		)
+	}
+
+	eng, err := experiment.NewEngine(reg, profile, engineOpts...)
 	if err != nil {
 		return "", err
 	}

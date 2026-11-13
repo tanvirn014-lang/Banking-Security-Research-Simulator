@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"banksec-lab/internal/assistant"
 	"banksec-lab/internal/finding"
 	"banksec-lab/internal/harness"
 )
@@ -83,6 +84,16 @@ type Attempt struct {
 	// implementations are Go closures rather than action sequences.
 	Plan  *ActionPlan `json:"plan,omitempty"`
 	Steps []Step      `json:"steps,omitempty"`
+	// Probe is the adversarial input, present for an assistant
+	// candidate. Recorded verbatim: the exact text is the test.
+	Probe *Probe `json:"probe,omitempty"`
+	// Transcript is what the assistant said and what the gateway did
+	// with its proposals.
+	Transcript *assistant.Transcript `json:"transcript,omitempty"`
+	// ToolsAttempted and ToolsExecuted are kept apart for the same
+	// reason the gateway keeps them apart: a proposal is not an action.
+	ToolsAttempted int `json:"tools_attempted,omitempty"`
+	ToolsExecuted  int `json:"tools_executed,omitempty"`
 	// SnapshotBefore and SnapshotAfter are the oracle-observed state the
 	// verdicts were drawn from.
 	SnapshotBefore Snapshot        `json:"snapshot_before"`

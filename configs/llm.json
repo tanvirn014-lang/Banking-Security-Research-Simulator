@@ -1,0 +1,25 @@
+{
+  "experiment_mode": "local-assistant-red-team",
+  "assistant": {
+    "provider": "ollama",
+    "base_url": "http://127.0.0.1:11434",
+    "model": "llama3.1:8b",
+    "timeout_seconds": 120,
+    "temperature": 0,
+    "max_output_tokens": 512,
+    "max_input_chars": 24000,
+    "prompt_version": "assistant-v1",
+    "require_local_model": true
+  },
+  "generator": {
+    "provider": "ollama",
+    "base_url": "http://127.0.0.1:11434",
+    "model": "gemma3:12b",
+    "timeout_seconds": 240,
+    "temperature": 0.8,
+    "max_output_tokens": 512,
+    "max_input_chars": 8000,
+    "prompt_version": "attack-generator-v1",
+    "require_local_model": true
+  }
+}

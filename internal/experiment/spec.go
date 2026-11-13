@@ -26,6 +26,9 @@ const (
 	GeneratorMutation GeneratorType = "mutation"
 )
 
+// GeneratorLLM is declared in llmgen.go, alongside the generator it
+// names.
+
 // knownGenerators is the closed set of generator types this package
 // implements. An adaptive generator is a documented extension point
 // (see Generator's doc comment), deliberately not a value here: naming
@@ -34,6 +37,7 @@ const (
 var knownGenerators = map[GeneratorType]struct{}{
 	GeneratorStatic:   {},
 	GeneratorMutation: {},
+	GeneratorLLM:      {},
 }
 
 // StopCondition names a reason an experiment should halt before its
