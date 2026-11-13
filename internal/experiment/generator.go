@@ -52,6 +52,11 @@ type Observation struct {
 	// Attempted summarizes every candidate already evaluated, oldest
 	// first.
 	Attempted []AttemptSummary
+	// TargetAccount is another customer's account identifier, present
+	// only when the spec sets DiscloseTargetAccount. Empty otherwise.
+	// See that field for why this is a defensible thing to hand an
+	// attacker and what it costs the disclosure measurement.
+	TargetAccount string
 }
 
 // AttemptSummary is what one evaluated candidate is reduced to for a

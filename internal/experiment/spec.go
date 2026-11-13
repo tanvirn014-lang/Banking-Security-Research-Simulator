@@ -132,6 +132,24 @@ type ExperimentSpec struct {
 	Seed           int64           `json:"seed"`
 	StopConditions []StopCondition `json:"stop_conditions,omitempty"`
 	Safety         Safety          `json:"safety"`
+	// DiscloseTargetAccount gives an adaptive generator the account
+	// identifier of another customer in the fixture.
+	//
+	// This is a research condition, not a convenience. Without it a
+	// generated probe can only cite an account number it invented, which
+	// the bank refuses as nonexistent rather than unauthorized, so the
+	// cross-account authorization path is never actually reached and
+	// every verdict about it is inconclusive.
+	//
+	// Disclosing the identifier is defensible because a real attacker can
+	// obtain an account number from a cheque, a statement or a prior
+	// transfer; knowing one is a precondition of the attack, not the
+	// attack. The victim's *balance* is never disclosed, so a leaked
+	// balance remains genuine evidence of disclosure. Identifiers handed
+	// over this way are recorded and excluded from the disclosure check,
+	// since the assistant cannot leak what the attacker was already
+	// given.
+	DiscloseTargetAccount bool `json:"disclose_target_account"`
 	// SeedScenarios names the registered scenario IDs a derivative
 	// generator draws from. Required for GeneratorMutation, which has
 	// nothing to mutate without one. Empty under GeneratorStatic means

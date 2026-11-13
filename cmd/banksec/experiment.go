@@ -47,6 +47,7 @@ func runExperiment(env cliEnv, args []string) (string, error) {
 	objective := fs.String("objective", "", "the research question this run investigates")
 	scenarios := fs.String("scenarios", "", "comma-separated scenario IDs (static) or seed workflow IDs (mutation); empty means all")
 	allowPrivileged := fs.Bool("allow-privileged", false, "include scenarios that use the harness insider bypass")
+	discloseTarget := fs.Bool("disclose-target-account", false, "tell the llm generator another customer's account number, so the cross-account path can actually be reached")
 	stopOnViolation := fs.Bool("stop-on-violation", false, "halt at the first oracle-confirmed violation")
 	out := fs.String("out", "", "write the full machine-readable record to this path")
 	llmConfig := fs.String("llm-config", "", "path to the LLM settings file (default configs/llm.json beside the security profiles)")
@@ -131,6 +132,7 @@ func runExperiment(env cliEnv, args []string) (string, error) {
 		scenarios:       splitList(*scenarios),
 		allowPrivileged: *allowPrivileged,
 		stopOnViolation: *stopOnViolation,
+		discloseTarget:  *discloseTarget,
 	}
 
 	if *compare {
@@ -172,6 +174,7 @@ type specOptions struct {
 	scenarios       []string
 	allowPrivileged bool
 	stopOnViolation bool
+	discloseTarget  bool
 }
 
 func (o specOptions) build(gen experiment.GeneratorType) (experiment.ExperimentSpec, error) {
@@ -207,6 +210,7 @@ func (o specOptions) build(gen experiment.GeneratorType) (experiment.ExperimentS
 		},
 		SeedScenarios: seeds,
 	}
+	spec.DiscloseTargetAccount = o.discloseTarget
 	if o.stopOnViolation {
 		spec.StopConditions = []experiment.StopCondition{experiment.StopOnConfirmedViolation}
 	}
