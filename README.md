@@ -389,13 +389,19 @@ document without checking):
   (`Environment.GenerateTestKey`) instead, since nothing in
   `cmd/banksec`/`internal/backend`/`internal/protocol` actually sources
   key material from the keystore yet (ledgered since Milestone 5).
-- **`cmd/banksec` has no `--profile` flag** — it always runs under
-  `configs/hardened.json`; the vulnerable profile can only be exercised
-  through tests and library code, never the shipped binary.
+- **The banking subcommands have no `--profile` flag** —
+  `create-account`, `deposit`, `withdraw`, `transfer`, `balance` and
+  `history` always run under `configs/hardened.json`, so a weakened
+  configuration is not reachable through ordinary banking operations.
+  The `experiment` and `assistant` subcommands do accept `--profile`,
+  because comparing configurations is the point of a research run; both
+  print a warning before any output when the profile is not `hardened`,
+  so a weakened run can never be mistaken for a normal one.
 - **No CLI subcommand for `internal/agent` or `internal/benchmark`** —
-  both are fully functional and tested, driven entirely through Go code
-  (consistent with their own milestones' scoping, which named only new
-  packages, not CLI integration).
+  both are fully functional and tested, driven entirely through Go code.
+  `internal/harness` is reachable from the CLI through
+  `banksec experiment`, which runs the registered attack corpus under
+  either profile.
 - **`RolePrivilegedOperator` is defined but never functionally used** —
   `internal/domain` defines two principal roles, but only
   `RoleAccountOwner`-vs-`RoleAccountOwner` authorization (an owner acting
