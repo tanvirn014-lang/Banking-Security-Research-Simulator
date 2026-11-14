@@ -239,13 +239,10 @@ through for cryptographic operations (`internal/backend`,
    primitive only — see §1.1/§1.2 above and
    See this project's design notes for the full design and its scope
    decisions. `internal/protocol`'s
-   wire format is untouched: there is still no live handshake anywhere
-   in this system, and `NewClient`/`NewServer` are still handed a
-   pre-provisioned session key exactly as before. Wiring key exchange
-   into the protocol layer itself remains a separate, larger unit of
-   work, deliberately out of scope here, and should start with its own
-   design/scoping pass given how much of the wire protocol currently
-   assumes no handshake exists at all.
+   the wire format. That wiring has since been done -- see "Wire
+   confidentiality" below: a connection now agrees a session key on its
+   first request and encrypts its frame payloads under it, so key
+   exchange is no longer a primitive with no caller.
 
 Whatever is added, keep the binding rule: no cryptographic primitive is
 ever hand-rolled from scratch — real cryptography is Go standard library
@@ -266,3 +263,104 @@ proven weak by a real test, never merely asserted.
   implemented) remains an open, carried-forward item — see that section
   above for the full explanation. §1.2's X25519 key-agreement gap is
   closed as of this unit of work.
+
+## Wire confidentiality
+
+Frame payloads were authenticated but never encrypted: the protocol gave
+integrity and authenticity on the wire, not confidentiality. Banking
+requests travelled as readable JSON. This section records what changed
+and what still has not.
+
+### Key agreement, then encrypt-then-MAC
+
+A connection agrees a session key on its first request. Client and server
+each generate a keypair for the profile in force, exchange public values
+in a frame reserved at sequence zero, and run `Engine.DeriveSharedSecret`
+— X25519 under `standard`, small-group Diffie-Hellman under
+`weak-educational`. The agreed secret is expanded with HKDF under a
+labelled info string into a 32-byte key.
+
+The raw secret is never used directly. Under `weak-educational` it comes
+from a tiny group and is far too small to serve as an AES key at all, so
+derivation is not optional there; deriving both profiles uniformly means
+they differ only in the strength of the agreement, which is exactly the
+property the attack scenarios measure.
+
+Payloads are then encrypted before the authentication tag is computed, so
+the tag covers the ciphertext. This is **encrypt-then-MAC**, chosen
+deliberately over the alternatives. The frame format did not change: the
+tag already covered `(Version, Seq, CryptoProf, Payload)`, and `Payload`
+simply became ciphertext — so the replay and downgrade bindings are
+untouched. The server verifies the tag first and only then decrypts; a
+payload that will not decrypt is refused outright rather than handed to
+the request parser.
+
+This also connects `DeriveSharedSecret` to the protocol for the first
+time. The X25519 and toy-DH implementations previously existed only in
+`internal/crypto` and a synthetic scenario, used by nothing.
+
+### Why the weakened profile is not encrypted
+
+Wire encryption is gated on `protocol_auth_enforced`, the same flag that
+gates replay, tamper and downgrade checking.
+
+Encrypting the weakened profile's traffic would have closed its tamper
+surface by accident. AES-GCM authenticates its own ciphertext, so a
+tampered frame would be caught during decryption even with every explicit
+check disabled — silently removing an attack the corpus depends on. A
+control that quietly strengthens the configuration built to be weak makes
+the comparison between the two meaningless.
+
+The result is the differential this change exists to provide: under the
+hardened profile banking traffic is ciphertext on the wire; under the
+weakened profile it is readable JSON.
+
+### What this made possible
+
+The cryptographic attack scenarios were previously *passive, standalone
+cryptanalysis* — they encrypted synthetic plaintext and inspected the
+result. They demonstrated properties of algorithms, not weaknesses of the
+system, and never touched `env.Client`.
+
+The Diffie-Hellman scenario is now a complete attack on real traffic. It
+issues a genuine banking request, captures the handshake's public values
+and one encrypted frame — exactly what a passive eavesdropper would
+have — solves the discrete logarithm in the small group, derives the
+session key with the same public KDF the protocol uses, and decrypts the
+captured frame. Success requires the decrypted bytes to contain the
+operation that was really sent, so a decryption producing plausible
+garbage cannot pass.
+
+Measured: **1,371 modular operations to recover the secret, 100 bytes of
+real banking traffic decrypted.**
+
+### What has not changed
+
+**`pqc` frames are authenticated but not encrypted.** ML-KEM's key
+establishment is a two-message asymmetric encapsulation that the
+generate-then-exchange handshake above cannot express, and the protocol's
+pqc keys are ML-DSA signing keys rather than a KEM pair. Wire
+confidentiality for the post-quantum profile needs a KEM handshake and a
+second keypair; it is not implemented.
+
+**The ECB pattern-leakage scenario is still synthetic.** Ordinary banking
+JSON does not contain repeated 16-byte plaintext blocks, so observing ECB
+leakage in real traffic would need a request crafted to produce them.
+That is contrived in a way the Diffie-Hellman attack is not, and the
+scenario is left demonstrating the cipher's property directly rather than
+pretending to a realism it does not have.
+
+**The handshake response is not authenticated.** The client's handshake
+frame carries the usual tag and is verified under a hardened profile, so
+a tampered client public key is rejected. The server's reply carries no
+tag — the same limitation every response frame in this protocol already
+has, acceptable only because the default transport is an in-memory pipe
+with no on-path attacker. A real network transport would need the reply
+authenticated, and would need the whole exchange protected against a
+machine-in-the-middle, which this does not attempt.
+
+**This is not TLS, and is not a substitute for it.** There are no
+certificates, no PKI, no cipher-suite negotiation, no forward secrecy and
+no session resumption. The protocol is hand-rolled precisely so that it
+can be attacked: three registered scenarios target its properties
+directly, which would not be feasible against a production TLS stack.

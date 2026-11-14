@@ -9,6 +9,8 @@ import (
 	"math/rand"
 
 	"banksec-lab/internal/crypto"
+	"banksec-lab/internal/domain"
+	"banksec-lab/internal/protocol"
 	"banksec-lab/internal/quantum"
 )
 
@@ -17,6 +19,12 @@ import (
 // parties derived different secrets) -- a bug in the primitive, not
 // something the discrete-log attack below is meant to detect or
 // exploit.
+var errWeakDHNoAttackClient = errors.New("weak-dh scenario: this environment's client does not expose raw frame access, so no real traffic can be captured")
+
+var errWeakDHNoHandshake = errors.New("weak-dh scenario: the connection agreed no session key, so there is no key agreement to break")
+
+var errWeakDHNoCapturedFrame = errors.New("weak-dh scenario: no frame was captured from the wire")
+
 var errWeakDHPrimitiveMismatch = errors.New("harness: weak-educational DH round trip produced mismatched shared secrets")
 
 // errDHParameterOutOfRange is returned when p, g, or pubA does not fit
@@ -235,7 +243,8 @@ func dhDiscreteLogSucceeded(completed bool, recoveredSecret, realSecret []byte) 
 func NewDiffieHellmanDiscreteLogScenario() Scenario {
 	var applicable bool
 	var completed bool
-	var recoveredSecretBytes, realSecretBytes []byte
+	var recoveredSecretBytes []byte
+	var capturedCiphertext, decryptedPlaintext []byte
 	var operationCount int
 
 	return Scenario{
@@ -249,40 +258,64 @@ func NewDiffieHellmanDiscreteLogScenario() Scenario {
 			}
 			applicable = true
 
-			engine := crypto.NewEngine()
-			privA, pubA, err := engine.GenerateKeyPair("weak-educational")
-			if err != nil {
-				return err
+			// Generate real banking traffic. Everything this attack uses
+			// afterwards comes off that connection -- this is an attack
+			// on the system, not a demonstration of a property of small
+			// groups in isolation.
+			attacker, ok := env.Client.(protocol.AttackClient)
+			if !ok {
+				return errWeakDHNoAttackClient
 			}
-			privB, pubB, err := engine.GenerateKeyPair("weak-educational")
-			if err != nil {
+			owner := domain.Principal{ID: "owner-1", Role: domain.RoleAccountOwner}
+			if _, err := env.Client.Send(ctx, protocol.Request{
+				Op:     "create-account",
+				Actor:  owner,
+				Params: map[string]string{"owner": string(owner.ID)},
+			}); err != nil {
 				return err
 			}
 
-			secretA, err := engine.DeriveSharedSecret("weak-educational", privA, pubB)
-			if err != nil {
-				return err
+			// What a passive eavesdropper on the wire would have: the two
+			// public values from the key agreement, and one encrypted
+			// frame. No private key, no session key.
+			clientPub, serverPub, ok := attacker.HandshakeTranscript()
+			if !ok {
+				return errWeakDHNoHandshake
 			}
-			secretB, err := engine.DeriveSharedSecret("weak-educational", privB, pubA)
-			if err != nil {
-				return err
+			captured, ok := attacker.LastSentFrame()
+			if !ok {
+				return errWeakDHNoCapturedFrame
 			}
-			if !bytes.Equal(secretA, secretB) {
-				return errWeakDHPrimitiveMismatch
-			}
-			realSecretBytes = secretA
+			capturedCiphertext = append([]byte(nil), captured.Payload...)
 
+			// Break the agreement: solve the discrete logarithm in the
+			// toy group and recover the secret both sides agreed on.
 			p, g := crypto.ToyDHPublicParams()
-			pubAInt := new(big.Int).SetBytes(pubA)
-			pubBInt := new(big.Int).SetBytes(pubB)
-
-			recovered, ops, err := recoverWeakDHSharedSecret(ctx, p, g, pubAInt, pubBInt)
+			recovered, ops, err := recoverWeakDHSharedSecret(ctx, p, g,
+				new(big.Int).SetBytes(clientPub), new(big.Int).SetBytes(serverPub))
 			if err != nil {
 				return err
 			}
 			operationCount = ops
-			recoveredSecretBytes = make([]byte, len(secretA))
+
+			secretWidth := len(clientPub)
+			recoveredSecretBytes = make([]byte, secretWidth)
 			recovered.FillBytes(recoveredSecretBytes)
+
+			// Derive the session key the way the protocol does -- the
+			// derivation is public; only the secret was not -- and
+			// decrypt the captured banking traffic with it.
+			sessionKey, err := protocol.SessionKeyFromSecret(recoveredSecretBytes)
+			if err != nil {
+				return err
+			}
+			plaintext, err := crypto.NewEngine().Decrypt("weak-educational", sessionKey, capturedCiphertext)
+			if err != nil {
+				// The agreement was broken but the traffic did not open:
+				// recorded as a failed attack, not an error.
+				return nil
+			}
+			decryptedPlaintext = plaintext
 			completed = true
 			return nil
 		},
@@ -290,7 +323,17 @@ func NewDiffieHellmanDiscreteLogScenario() Scenario {
 			if !applicable {
 				return false, nil, nil
 			}
-			return dhDiscreteLogSucceeded(completed, recoveredSecretBytes, realSecretBytes), Evidence{EvidenceComputationalCost: int64(operationCount)}, nil
+			// Success means the captured traffic was actually read --
+			// not merely that a discrete log was solved. The decrypted
+			// bytes must contain the operation the client really sent,
+			// so a decryption that produced plausible-looking garbage
+			// cannot pass.
+			succeeded := completed && bytes.Contains(decryptedPlaintext, []byte("create-account"))
+			return succeeded, Evidence{
+				EvidenceComputationalCost:  int64(operationCount),
+				EvidenceDataLeakedBytes:    int64(len(decryptedPlaintext)),
+				EvidenceRecordsCompromised: int64(1),
+			}, nil
 		},
 	}
 }

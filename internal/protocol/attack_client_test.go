@@ -7,6 +7,7 @@ import (
 
 	"banksec-lab/internal/backend"
 	"banksec-lab/internal/config"
+	"banksec-lab/internal/crypto"
 	"banksec-lab/internal/domain"
 )
 
@@ -38,9 +39,34 @@ func TestAttackClient_LastSentFrame_MatchesWhatWasActuallySent(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected LastSentFrame to report a frame after a successful Send")
 	}
+	// Under a hardened profile the payload on the wire is ciphertext, so
+	// a captured frame no longer decodes as JSON. That is the point of
+	// wire encryption, and asserting it here is what stops the property
+	// being lost again: if this ever parses as a Request, banking
+	// traffic has gone out in the clear.
+	var leaked Request
+	if err := json.Unmarshal(frame.Payload, &leaked); err == nil {
+		t.Fatalf("the captured frame decoded as a plaintext request (%+v) -- traffic is not encrypted", leaked)
+	}
+
+	// It must still be the real request underneath: decrypting with the
+	// session key the connection agreed recovers exactly what was sent.
+	pc, ok := client.(*pipeClient)
+	if !ok {
+		t.Fatalf("expected the concrete pipeClient, got %T", client)
+	}
+	sessionKey := pc.SessionKey()
+	if sessionKey == nil {
+		t.Fatal("a hardened connection must have agreed a session key")
+	}
+
+	plaintext, err := crypto.NewEngine().Decrypt(frame.CryptoProf, sessionKey, frame.Payload)
+	if err != nil {
+		t.Fatalf("decrypt the captured frame with the session key: %v", err)
+	}
 	var gotReq Request
-	if err := json.Unmarshal(frame.Payload, &gotReq); err != nil {
-		t.Fatalf("decode captured frame payload: %v", err)
+	if err := json.Unmarshal(plaintext, &gotReq); err != nil {
+		t.Fatalf("decode the decrypted payload: %v", err)
 	}
 	if gotReq.Op != req.Op {
 		t.Fatalf("captured frame's payload doesn't match what Send sent: got %+v want %+v", gotReq, req)

@@ -35,6 +35,10 @@ type AttackClient interface {
 	// the harness observes its own attack-path connection, it does not
 	// need to sniff another session).
 	LastSentFrame() (frame Frame, ok bool)
+	// HandshakeTranscript returns the public values exchanged during key
+	// agreement -- what a passive eavesdropper would have seen. ok is
+	// false when the connection agreed no session key.
+	HandshakeTranscript() (clientPub, serverPub []byte, ok bool)
 	// BuildFrame constructs a validly-authenticated Frame for payload
 	// under profile -- which may differ from this Client's own
 	// configured profile (the downgrade attack's whole premise) -- using
@@ -79,6 +83,19 @@ type pipeClient struct {
 	nextSeq   uint64
 	lastFrame Frame
 	hasLast   bool
+
+	// sessionKey encrypts this connection's frame payloads, agreed with
+	// the server on the first Send. Nil until the handshake runs, and
+	// nil forever under a profile whose key establishment does not fit
+	// this handshake's shape (see supportsWireEncryption).
+	sessionKey    []byte
+	handshakeDone bool
+	// handshakeClientPub and handshakeServerPub are the public values
+	// exchanged during key agreement, retained so an attack scenario can
+	// work from what an eavesdropper would actually have seen on the
+	// wire rather than from values handed to it out of band.
+	handshakeClientPub []byte
+	handshakeServerPub []byte
 }
 
 // NewClient wraps conn as a Client. engine/authKey authenticate every
@@ -115,6 +132,15 @@ func (c *pipeClient) Send(ctx context.Context, req Request) (Response, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if err := c.ensureHandshake(ctx); err != nil {
+		return Response{}, err
+	}
+
+	payload, err = sealPayload(c.engine, c.profile.CryptoProfile, c.sessionKey, payload)
+	if err != nil {
+		return Response{}, err
+	}
 
 	c.nextSeq++
 	seq := c.nextSeq
@@ -227,4 +253,103 @@ func (c *pipeClient) roundTrip(ctx context.Context, f Frame) (Frame, error) {
 		return Frame{}, fmt.Errorf("receive response: %w", err)
 	}
 	return respFrame, nil
+}
+
+// ensureHandshake agrees a session key with the server, once per
+// connection. The caller must already hold c.mu.
+//
+// It runs lazily on the first Send rather than in NewClient, so that
+// constructing a client stays non-blocking and the constructor's
+// signature is unchanged -- every existing caller keeps working, and a
+// client that is built but never used performs no I/O.
+//
+// Under a profile with no key agreement of this shape (pqc), the
+// handshake is skipped and the connection carries authenticated but
+// unencrypted frames. That is recorded as a known limitation rather
+// than hidden: see docs/CRYPTOGRAPHY.md.
+func (c *pipeClient) ensureHandshake(ctx context.Context) error {
+	if c.handshakeDone {
+		return nil
+	}
+	c.handshakeDone = true // one attempt per connection, success or not
+
+	if !wireEncryptionEnabled(c.profile) {
+		return nil
+	}
+
+	priv, pub, err := c.engine.GenerateKeyPair(c.profile.CryptoProfile)
+	if err != nil {
+		return fmt.Errorf("generate session keypair: %w", err)
+	}
+
+	// The handshake frame is authenticated with the same tag scheme as
+	// every other frame, so a tampered client public key is caught by
+	// the server's existing check rather than silently agreeing a key
+	// with an attacker. The server's reply is not authenticated, which
+	// is the same limitation every response frame already carries (see
+	// NewClient's doc comment) and is acceptable only because the
+	// default transport is an in-memory pipe with no on-path attacker.
+	tag, err := computeTag(c.engine, c.profile.CryptoProfile, c.authKey,
+		macInput(1, handshakeSeq, c.profile.CryptoProfile, pub))
+	if err != nil {
+		return fmt.Errorf("authenticate handshake: %w", err)
+	}
+
+	resp, err := c.roundTrip(ctx, Frame{
+		Version:    1,
+		Seq:        handshakeSeq,
+		CryptoProf: c.profile.CryptoProfile,
+		Payload:    pub,
+		AuthTag:    tag,
+	})
+	if err != nil {
+		return fmt.Errorf("session handshake: %w", err)
+	}
+	if len(resp.Payload) == 0 {
+		return fmt.Errorf("session handshake: server returned no public key")
+	}
+
+	key, err := deriveSessionKey(c.engine, c.profile.CryptoProfile, priv, resp.Payload)
+	if err != nil {
+		return fmt.Errorf("session handshake: %w", err)
+	}
+	c.sessionKey = key
+	c.handshakeClientPub = append([]byte(nil), pub...)
+	c.handshakeServerPub = append([]byte(nil), resp.Payload...)
+	return nil
+}
+
+// HandshakeTranscript returns the two public values exchanged during
+// key agreement -- exactly what a passive eavesdropper on the wire would
+// have observed, and nothing more.
+//
+// This exists so a cryptanalytic attack scenario can be a real attack
+// on real traffic rather than a demonstration on synthetic inputs: an
+// attacker who can break the agreement recovers the session key from
+// these alone. It deliberately does not expose either private key.
+func (c *pipeClient) HandshakeTranscript() (clientPub, serverPub []byte, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.handshakeClientPub == nil || c.handshakeServerPub == nil {
+		return nil, nil, false
+	}
+	return append([]byte(nil), c.handshakeClientPub...),
+		append([]byte(nil), c.handshakeServerPub...), true
+}
+
+// SessionKey returns the key this connection encrypts its frames under,
+// or nil if it has none.
+//
+// Exposed so an attack scenario can check whether traffic it captured
+// is encrypted at all, and so a test can confirm that a key recovered
+// by cryptanalysis matches the real one. It is deliberately not part of
+// the Client interface -- only a caller holding the concrete type, which
+// means this package and the attack harness, can reach it.
+func (c *pipeClient) SessionKey() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sessionKey == nil {
+		return nil
+	}
+	return append([]byte(nil), c.sessionKey...)
 }

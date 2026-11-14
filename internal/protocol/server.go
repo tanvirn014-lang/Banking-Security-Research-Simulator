@@ -31,6 +31,12 @@ type pipeServer struct {
 	verifyKey []byte
 	profile   config.SecurityProfile
 
+	// sessionKey decrypts this connection's frame payloads, agreed
+	// during the handshake. Nil until then, and nil for the whole
+	// connection under a profile whose key establishment does not fit
+	// this handshake's shape (see supportsWireEncryption).
+	sessionKey []byte
+
 	// lastSeen is the highest Seq accepted so far on this connection.
 	// Only tracked/enforced when profile.ProtocolAuthEnforced is true --
 	// vulnerable mode does not track it at all, the deliberately
@@ -68,19 +74,44 @@ func (s *pipeServer) Serve(ctx context.Context, svc backend.Service) error {
 			return nil // connection closed (by peer, or by us on ctx cancellation)
 		}
 
+		// The handshake is recognised before any other check. It must
+		// not reach the replay logic, which rejects anything whose
+		// sequence number is not strictly greater than the last seen --
+		// and lastSeen starts at zero, so a handshake routed through it
+		// would be rejected as a replay of itself.
+		if reqFrame.Seq == handshakeSeq && wireEncryptionEnabled(s.profile) {
+			if err := s.handleHandshake(reqFrame); err != nil {
+				return err
+			}
+			continue
+		}
+
 		var resp Response
 		if rejectErr := s.checkFrameSecurity(reqFrame); rejectErr != nil {
 			resp = errorResponse(rejectErr)
 		} else {
-			var req Request
-			if err := json.Unmarshal(reqFrame.Payload, &req); err != nil {
-				// Reply with an error instead of returning: a Client is
-				// blocked in readFrame waiting for exactly this response,
-				// and dying here would hang it forever rather than
-				// surfacing the problem.
-				resp = errorResponse(apperr.Wrap(apperr.CodeValidation, "malformed request", err))
-			} else {
-				resp = dispatch(ctx, svc, req)
+			// Decryption comes after the security check, never before:
+			// the tag covers the ciphertext, so verifying it first is
+			// the "then-MAC" half of encrypt-then-MAC. A payload that
+			// will not decrypt is rejected outright — treating the raw
+			// bytes as plaintext instead would hand an attacker who
+			// corrupted the ciphertext a direct path to the request
+			// parser.
+			plaintext, decErr := openPayload(s.engine, reqFrame.CryptoProf, s.sessionKey, reqFrame.Payload)
+			switch {
+			case decErr != nil:
+				resp = errorResponse(apperr.Wrap(apperr.CodeValidation, "undecryptable payload", decErr))
+			default:
+				var req Request
+				if err := json.Unmarshal(plaintext, &req); err != nil {
+					// Reply with an error instead of returning: a Client
+					// is blocked in readFrame waiting for exactly this
+					// response, and dying here would hang it forever
+					// rather than surfacing the problem.
+					resp = errorResponse(apperr.Wrap(apperr.CodeValidation, "malformed request", err))
+				} else {
+					resp = dispatch(ctx, svc, req)
+				}
 			}
 		}
 
@@ -224,4 +255,43 @@ func errorResponse(err error) Response {
 		OK:    false,
 		Error: fmt.Sprintf("%s: %s", apperr.CodeOf(err), err.Error()),
 	}
+}
+
+// handleHandshake answers a client's key-agreement frame and records
+// the resulting session key for this connection.
+//
+// The client's frame is authenticated with the same tag scheme as every
+// other frame, and that check is enforced here under the same profile
+// gate as the rest — so under a hardened profile a tampered client
+// public key is rejected rather than silently agreed with. The reply
+// carries no tag, which is the limitation every response frame in this
+// protocol already has, and is acceptable only because the default
+// transport is an in-memory pipe with no on-path attacker. A real
+// network transport would need the reply authenticated too.
+func (s *pipeServer) handleHandshake(f Frame) error {
+	if s.profile.ProtocolAuthEnforced {
+		ok, err := verifyTag(s.engine, f.CryptoProf, s.verifyKey,
+			macInput(f.Version, f.Seq, f.CryptoProf, f.Payload), f.AuthTag)
+		if err != nil || !ok {
+			// Refuse to agree a key, and say nothing useful back. The
+			// client's next frame then fails to decrypt, which is the
+			// correct outcome: no session was established.
+			return writeFrame(s.conn, Frame{Version: f.Version, Seq: f.Seq})
+		}
+	}
+
+	priv, pub, err := s.engine.GenerateKeyPair(f.CryptoProf)
+	if err != nil {
+		return fmt.Errorf("generate session keypair: %w", err)
+	}
+
+	key, err := deriveSessionKey(s.engine, f.CryptoProf, priv, f.Payload)
+	if err != nil {
+		// A malformed or hostile peer public key must not establish a
+		// session. Reply with nothing and leave sessionKey nil.
+		return writeFrame(s.conn, Frame{Version: f.Version, Seq: f.Seq})
+	}
+	s.sessionKey = key
+
+	return writeFrame(s.conn, Frame{Version: f.Version, Seq: f.Seq, Payload: pub})
 }
